@@ -1,0 +1,7 @@
+planner: { model: claude-code }
+implementer: { count: 1, model: claude-code }
+critic_security: { model: claude-code }
+policies:
+  protected_branches: ["main", "master"]
+  require_green_ci: true
+  require_human_review: true
