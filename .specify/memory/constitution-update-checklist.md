@@ -1,0 +1,1 @@
+../../docs/architecture/CONSTITUTION_UPDATE_CHECKLIST.md
