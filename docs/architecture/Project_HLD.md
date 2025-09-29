@@ -10,23 +10,26 @@ _Context-aware • Preview-first • Signed plans • Human-approved • **Durab
 
 ~~~mermaid
 flowchart LR
-  U[User] --> IN[Intake & Reason]
+ U[User] --> IN[Intake & Reason]
   IN --> RAG((ContextRAG: prefs/history/exemplars))
   IN --> PLIB[Plan Library]
   PLIB --> RET[Retrieve & Score Plans]
-  IN --> REG[Plugin Registry]
-  REG --> SEL[Select Plugins]
-  SEL --> PLAN[Planner (dry_run plan)]
-  PLAN --> SIG[Signer (Ed25519)]
-  SIG --> PREV[Preview Orchestrator (n8n, read-only)]
+  IN --> REG[Plugin Registry- n8n bindings]
+  REG --> SEL[Select Tools]
+  SEL --> PLAN[Planner dry_run plan]
+  PLAN --> SIG[Signer Ed25519]
+  SIG --> PREV[Preview Orchestrator n8n, read-only]
   PREV -->|Preview card + evidence| U
-  U -->|Approve| GATE[Approval Gate]
-  GATE --> EXE[n8n Execute (short jobs)]
-  GATE --> DUR[Temporal Durable Orchestrator (long jobs)]
-  EXE --> ADP[Adapters / Activities]
-  DUR --> ADP
-  ADP --> AUD[Audit & Metrics]
-  ADP --> PW[PlanWriter → Plan Library + History]
+  U -->|Approve Gate A/B/…| GATE[Approval Gates]
+  GATE --> EXE[n8n Execute short jobs via connectors]
+  GATE --> DUR[Temporal Durable Orchestrator long jobs]
+  EXE --> BIND[Binding Resolver plan → n8n node params]
+  EXE --> CONN[n8n Connector Nodes GCal/Gmail/HTTP/Slack…]
+  DUR --> ACT[Temporal Activities HTTP/SDK calls as needed]
+  CONN --> AUD[Audit & Metrics]
+  ACT --> AUD
+  CONN --> PW[PlanWriter → Plan Library + History]
+  ACT --> PW
   AUD --> U
   PW --> RAG
 ~~~
@@ -42,13 +45,20 @@ flowchart LR
 - **Preview-first safety:** Every flow produces a **side-effect-free Preview**; writes happen **only after** explicit approval.  
 - **Deterministic planning:** Planner is **stateless**; the plan is canonicalized and **Ed25519-signed** before execution.  
 - **Context engineering:** Fetch **just enough** context as tiny, typed **`evidence[]`** (tiers), never raw blobs.  
-- **Separation of concerns:** Orchestrators orchestrate; **Adapters/Activities** perform side-effects behind JSON-schema’d contracts.  
-- **Durability & parallelism:** Long jobs and multi-agent roles execute in **Temporal** with signals, idempotency, and compensation.  
+- **Separation of concerns:** Orchestrators orchestrate; n8n connectors perform I/O; Temporal adds durability.  
 - **Auditability:** Correlate everything on `plan_id`; store outcomes and derived facts, not raw private content.
 
 ---
 
 ## 2) Canonical Contracts (Source of Truth)
+
+### 2.0 Deterministic Inputs (Planner)
+The Planner is a pure function of this frozen tuple:
+- **Intent vN** (finalized, versioned)
+- **Evidence vK** (from ContextRAG; small, typed)
+- **Registry vR** (connector catalog snapshot)
+- **Policy vC** (GLOBAL_SPEC/config version)
+Same tuple ⇒ same canonical plan bytes ⇒ same hash/signature.
 
 ### 2.1 Intent (Intake → Planner)
 ~~~json
@@ -74,7 +84,7 @@ flowchart LR
 }
 ~~~
 
-### 2.3 Plan (deterministic; steps labeled for runtime + role)
+### 2.3 Plan (deterministic; supports HITL gates)
 ~~~json
 {
   "plan_id": "<ulid>",
@@ -84,9 +94,10 @@ flowchart LR
       "step": 1,
       "mode": "interactive|durable",
       "role": "Watcher|Resolver|Booker|Notifier",
-      "uses": "<plugin_id>",
+      "uses": "<tool_id>",
       "call": "<operation>",
       "args": {},
+      "after": [/* deps, optional */],
       "dry_run": true
     }
   ],
@@ -118,22 +129,23 @@ flowchart LR
 }
 ~~~
 
-### 2.6 Execute Wrapper (side-effects via adapters/activities)
+### 2.6 Execute Wrapper (connector result)
 ~~~json
 {
-  "provider": "<adapter>",
+  "provider": "<connector_id>",
   "result": { "id": "<external_id>", "link": "<optional>" },
   "status": "created|updated|skipped|error"
 }
 ~~~
 
-### 2.7 Approval Token (binds user + plan hash, short TTL)
+### 2.7 Approval Token (binds user + plan hash; supports multi-gate)
 ~~~json
 {
   "token": "<jwt|ulid>",
   "plan_hash": "<sha256>",
   "user_id": "<uuid>",
-  "exp": "<iso>"
+  "exp": "<iso>",
+  "scopes": ["shopping.write"]
 }
 ~~~
 
@@ -154,15 +166,10 @@ flowchart LR
 ## 4) Components (What Each Does)
 
 ### 4.1 Intake & Reason (`components/Intake/`)
-- **Purpose:** Convert user text + channel metadata into an Intent.  
-- **Responsibilities:** classification, entity extraction, tz/user binding, early safety checks.  
-- **I/O:** text → **Intent** (see §2.1).  
-- **Notes:** may call ContextRAG for minor lookups (optional).
+High-level goal shaping across turns; maintains a minimal Session/Goal summary and a Readiness Gate (when to plan). Emits Intent.
 
 ### 4.2 ContextRAG (`components/ContextRAG/`)
-- **Purpose:** Curate just-enough context under a tier budget.  
-- **Responsibilities:** per-tier allowlists; fetch from **Profile**, **History**, **Plan Library**, **Vector Index**, Contacts; re-rank (semantic + recency + success + personal-fit); dedupe/compress; emit **`evidence[]`**.  
-- **Data:** `schemas/evidence.json`; caches (LRU/TTL); decay/TTL of history; consent flags.
+Curates just-enough context from Profile, History, Plan Library, Vector Index, Contacts; re-ranks and emits typed evidence[].
 
 ### 4.3 Profile Store / History / Vector Index
 - **Profile:** durable prefs & consent flags (forget/export).  
@@ -172,46 +179,37 @@ flowchart LR
 ### 4.4 Plan Library • Plan Retrieval
 - **Plan Library:** canonical plans, signatures, outcomes; similarity search.  
 - **Plan Retrieval:** propose successful prior plans with scores (hybrid retrieval).
+- Ranks candidates via hybrid score (BM25 + vector + success + recency). Returns a short “why” rationale and suggested seeds.
 
-### 4.5 Plugin Registry • Plugin Selector
-- **Registry:** tool catalog (JSON Schemas, scopes, examples, safety class).  
-- **Selector:** choose minimal, safe tools per Intent (scope minimization, budget/latency).
+
+### 4.5 Plugin Registry (n8n-aware) • Tool Selector
+- **Registry:** Source of truth for logical tools → n8n connector bindings (node name/op, param maps, previewability, safety class, scopes, idempotency hints).
+- **Selector:** choose minimal set of tools/ops per Intent (scope minimization, latency/cost/health).
 
 ### 4.6 Planner (Stateless) (`components/Planner/`)
-- **Purpose:** Deterministically produce a plan graph (dry-run), labeling each step with `{mode, role}`.  
-- **Responsibilities:** consume **Intent + evidence + registry**; emit **plan** + optional `needs[]` for low-confidence gaps.  
-- **Notes:** no datastore access; no side-effects; pure function of inputs.
+- Deterministically emits the plan graph, labeling steps with {mode, role} and inserting HITL approval steps (with gate_id) where needed.
 
 ### 4.7 Signer (`components/Signer/`)
-- **Purpose:** Ed25519 sign/verify over the canonical plan.  
-- **Responsibilities:** key storage (KMS), rotation, audit, verification at Preview/Execute entry points.
+- Ed25519 sign/verify over the canonical plan; key rotation & audit; verification happens at Preview/Execute entry.
 
 ### 4.8 Preview Orchestrator (n8n) (`components/PreviewOrchestrator/`)
-- **Purpose:** Execute plan **read-only** to produce a Preview wrapper.  
-- **Responsibilities:** verify signature; call only read endpoints/adapters; assemble **Preview** (`source:"preview"`, `can_execute`); include evidence.
+- Verifies signature, filters to previewable ops from the Registry, runs connectors (read-only) via Binding Resolver, and returns a Preview wrapper.
 
 ### 4.9 Approval Gate (`components/Approvals/`)
-- **Purpose:** Present Preview, collect approval, issue **approval_token**.  
-- **Responsibilities:** TTL and single-use guarantees; revocation; bind token to `plan_hash` + `user_id`.
+- Presents Preview/choices; on Approve, issues an approval token bound to {plan_hash, gate_id, user_id} with short TTL and single-use semantics.
 
 ### 4.10 Execute Orchestrator (n8n, short jobs) (`components/ExecuteOrchestrator/`)
-- **Purpose:** Execute approved **interactive** steps (`mode:"interactive"`).  
-- **Responsibilities:** verify signature + token; call write adapters; collect **Execute** wrappers; notify; audit.
+- Verifies signature and the gate’s approval token; for each step:
+- mode:"interactive" → run n8n connector nodes through the Binding Resolver; enforce idempotency (Data Store: plan_id:step:arg_hash).
+- mode:"durable" → hand off to Temporal (start workflow), then continue when signaled.
+    Collects Execute wrappers, notifies user, and calls PlanWriter.
+
+### 4.11 Binding Resolver (components/BindingResolver/)
+- Small mapping layer (can live inside n8n or as a helper service):
+    {uses, call, args} + Registry vR → {node, operation, params} for the n8n node. Keeps flows generic; adding capabilities means editing the Registry, not flows.
 
 ### 4.11 Durable Orchestrator (Temporal, long jobs) (`components/DurableOrchestrator/`)
-- **Purpose:** Run **durable** steps (`mode:"durable"`) over days/weeks.  
-- **Capabilities:**  
-  - **Workflows** (deterministic; no I/O).  
-  - **Activities** (your adapters; retries, rate limits, **idempotency keys**, compensation).  
-  - **Child workflows** (parallel fan-out).  
-  - **Signals** (`approval`, `cancel`, `reconfigure`).  
-  - **Queries** (`status` for UI).  
-  - **Timers** (durable sleep/backoff), **ContinueAsNew** (truncate history).  
-  - **Search attributes**: index by `user_id`, `plan_id`, `intent`.
-
-### 4.12 Adapters / Activities (`components/Adapters/*`)
-- **Purpose:** Provider-specific integrations (Calendar, People, Messaging, WebAutomation, Payments).  
-- **Responsibilities:** JSON-schema’d I/O; least-privilege tokens; PII-safe logs; **idempotency** on writes; retries/backoff; compensations.
+- Durable workflows for watchers/bookers/notifiers over days/weeks: deterministic core, Activities for I/O, retries/backoff, signals (approve/cancel/reconfigure), queries (status), ContinueAsNew, search attributes (user_id, plan_id, intent).
 
 ### 4.13 PlanWriter (`components/PlanWriter/`)
 - **Purpose:** Persist outcomes back to **Plan Library** & **History**; trigger vector re-index.  
@@ -245,69 +243,52 @@ Use **roles**, not heavyweight bespoke LLMs per task:
 
 ---
 
-## 6) End-to-End Examples
+## 6) Human-in-the-Loop (HITL) Pattern (Multi-Gate)
 
-### 6.1 Simple (interactive) — “Arrange a meeting next Tuesday with X”
-1. **Intake** → Intent (entities: attendee_hint “X”, date), tz, user_id, `context_budget=2`.  
-2. **ContextRAG** (Tier-2/3) → evidence: duration 30m, Tue 10–12 window, X’s email (confidence 0.88).  
-3. **Planner** → plan (`mode:"interactive"` steps only); **Signer** signs.  
-4. **Preview (n8n, read-only)** → card: title/date/proposed 10:30–11:00; evidence shown; `can_execute:true`.  
-5. **Approval** → token issued.  
-6. **Execute (n8n)** → CalendarAdapter.create_event; **PlanWriter** + **Audit**; ContextRAG learns the successful window.
+Insert explicit approval steps with unique gate_id (“gate-A”, “gate-B”…).
+Each gate issues a token bound to {plan_hash, gate_id, user_id}.
+Subsequent write steps must present the matching gate token or they won’t run.
+Typical shopping flow: shortlist → Gate A (choose) → add to cart → Gate B (final review) → purchase.
 
-### 6.2 Long-running (durable multi-agent) — “Watch visa slots 45 days; auto-book earliest morning”
-- **Planner** emits a plan with roles:
-  ~~~json
-  {
-    "graph": [
-      { "step": 1, "mode": "durable", "role": "Watcher", "uses": "VisaAdapter", "call": "watch_slots", "args": { "consulates": ["IN-DEL","IN-MUM"], "window_days": 45, "hold_minutes": 10 } },
-      { "step": 2, "mode": "interactive", "role": "Resolver", "uses": "Approvals", "call": "request_user_approval" },
-      { "step": 3, "mode": "durable", "role": "Booker", "uses": "VisaAdapter", "call": "book", "args": { "idempotency_key": "plan:<id>:slot" } },
-      { "step": 4, "mode": "durable", "role": "Notifier", "uses": "MessagingAdapter", "call": "notify" }
-    ]
-  }
-  ~~~
-- **n8n** starts **Temporal** workflow `VisaSlotWatch(plan_id, params)` (Watcher).  
-- Watcher fans out to child workflows per consulate; polls with backoff; on slot → **place_hold** (activity) → **signal** n8n for approval (Resolver).  
-- On approval signal → Booker runs **book** (idempotent); Notifier sends confirmation; **PlanWriter** persists; **History** learns preferred windows.
+## 7) Dynamic Mapping to n8n Connectors
 
+Registry stores connector bindings for each logical uses/call: node name, operation, arg/param maps, previewability, scopes, idempotency hints.
+Binding Resolver turns plan steps into ready-to-run n8n node parameters.
+n8n flows remain generic (Preview/Execute only); adding capabilities is a Registry edit, not a flow change.
+
+## 8) Safety, Reliability, Governance
+
+Signature verified at Preview/Execute; approval tokens required for writes (and per-gate where applicable).
+Preview never mutates; only Registry-marked previewable ops run there.
+Idempotency on every write (plan_id:step:arg_hash in n8n Data Store/DB).
+Compensation when supported (cancel/delete ops declared in Registry).
+Privacy: Tier-5 gated by consent; store derived facts; TTL/forget/export supported.
+Observability: per-step logs with plan_id, op, latency_ms, retries, status.
+
+## 9) Non-Functional Baselines
+
+Preview p95 < 800 ms; short Execute steps p95 < 2 s.
+ContextRAG p95 < 150 ms; Plan Retrieval p95 < 200 ms; Vector top-K < 100 ms.
+Durable flows survive restarts; ContinueAsNew daily or on N events.
+Availability: 99.9% (Intake/Preview), 99.5% (Execute/Durable).
+
+## 10) Repository Mapping (Per Component Packet)
+
+Each components/<Name>/ includes: SPEC.md, LLD.md, schemas/, tests/, code.
+Intake, ContextRAG, Planner, Signer, PreviewOrchestrator, ExecuteOrchestrator, DurableOrchestrator, PluginRegistry, BindingResolver, PlanLibrary, PlanRetrieval, PlanWriter, Audit.
+GLOBAL_SPEC.md: Intent, Evidence, Preview/Execute wrappers, plan step schema with {mode, role, after, gate_id}.
+
+## 11) End-to-End Examples (Conceptual)
+- 11.1 Meeting (interactive)
+
+Intent → ContextRAG → Plan (list_free_busy → Gate A approve slot → create_event) → Preview (read) → Gate A token → Execute (write) → PlanWriter/Audit.
+
+- 11.2 Shopping (HITL multi-gate)
+
+Search/rank → Gate A (choose shortlist) → add_to_cart → Gate B (cart review) → purchase.
+Each write phase requires the matching gate token; idempotency avoids duplicates.
+
+- 11.3 Visa watcher (durable)
+
+Watchers in Temporal; on slot hold → signal Gate for approval; on approve, book; notify; write-back.
 ---
-
-## 7) Safety, Reliability, Governance
-
-- **Preview vs Execute** is a hard wall; Preview never mutates providers.  
-- **Signatures** verified at Preview and Execute entry points.  
-- **Approval token** required before any write.  
-- **Idempotency** on every write activity (`plan_id:step:arg_hash`).  
-- **Compensation** paths for holds/carts/resources (Saga).  
-- **Rate limits** centralized in activities (token bucket).  
-- **Privacy:** Tier-5 requires consent; store only derived facts; TTL/forget/export supported.  
-- **Determinism:** workflows are pure; all I/O in activities.
-
----
-
-## 8) Non-Functional Baselines
-
-- Preview p95 < **800 ms**; short Execute steps p95 < **2 s**.  
-- Durable workflows survive restarts; use **ContinueAsNew** every 24 h or N events.  
-- Availability: 99.9% (Intake/Preview), 99.5% (Execute/Durable).  
-- Observability: traces across plan/preview/execute; searchable by `plan_id`, `user_id`, `intent`.
-
----
-
-## 9) Repository Mapping (Per Component Packet)
-
-Each `components/<Name>/` includes: `SPEC.md`, `LLD.md`, `schemas/`, `tests/`, code.
-
-- **Intake, ContextRAG, Planner, Signer, PreviewOrchestrator, ExecuteOrchestrator, DurableOrchestrator, PluginRegistry, PlanLibrary, PlanRetrieval, Adapters/*, PlanWriter, Audit**.  
-- **GLOBAL_SPEC.md**: Intent, Evidence, Preview/Execute, **plan step `{mode, role}`** schema.
-
----
-
-## 10) Next Steps
-
-1. Add `{ "mode", "role" }` to plan-step schema in **GLOBAL_SPEC.md**.  
-2. Create `components/DurableOrchestrator/` (SPEC/LLD): workflows, signals (`approval|cancel|reconfigure`), queries (`status`), child-workflow patterns, ContinueAsNew policy.  
-3. Wrap first adapters as **Temporal activities** (Calendar/People/Messaging) with JSON Schemas + idempotency + tests.  
-4. Stand up two n8n flows (**Preview**, **Execute**) and wire a Temporal starter (Watcher sample).  
-5. Seed ContextRAG with 3 prefs + 1 pattern; wire **PlanWriter** write-back.
