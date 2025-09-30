@@ -40,6 +40,15 @@ Component `SPEC.md` files **inherit** these rules and may only deviate if explic
 
 ## 2) Canonical Contracts
 
+### 2.0 Deterministic Inputs (Planner)
+The planner is a pure function of a frozen tuple:
+- Intent vN (finalized)
+- Evidence vK (typed, small)
+- Registry vR (connector catalog snapshot)
+- Policy vC (GLOBAL_SPEC version)
+
+Same tuple ⇒ same canonical plan bytes ⇒ same hash/signature.
+
 ### 2.1 Intent (input)
 ~~~json
 {
@@ -77,7 +86,7 @@ Component `SPEC.md` files **inherit** these rules and may only deviate if explic
       "uses": "<tool_id>",
       "call": "<operation>",
       "args": {},
-      "after": [/* deps */],
+      "after": [/* deps, optional */],
       "gate_id": "gate-A",
       "dry_run": true
     }
@@ -147,6 +156,7 @@ Component `SPEC.md` files **inherit** these rules and may only deviate if explic
 ## 4) Schemas & Validation
 - **Component-specific schemas** in `components/<Name>/schemas/`  
 - **Shared contracts** in `plugins/schemas/` (Intent, Evidence, Plan, Signature, Wrappers)  
+- **Use case plans** in `usecases/<UseCase>/plans/` must validate against the Plan schema in this file  
 - **Tests must validate** against schemas; **no schema drift**  
 
 ---
@@ -185,8 +195,9 @@ Component `SPEC.md` files **inherit** these rules and may only deviate if explic
 ---
 
 ## 9) Repository Mapping
-Each `components/<Name>/` includes: SPEC.md, LLD.md, schemas/, tests/, code.  
-Global contracts live in this file.  
+Each `components/<Name>/` includes: SPEC.md, LLD.md, schemas/, tests/, code.
+Each `usecases/<UseCase>/` includes: SPEC.md, LLD.md, plans/, tests/, fixtures/.
+Global contracts live in this file.
 
 ---
 

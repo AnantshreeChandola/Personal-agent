@@ -10,6 +10,7 @@
 - **plugins/** — shared tool registry + JSON Schemas used across components.
 - **tests/** — cross-component/system-level tests.
 - **.github/workflows/** — CI pipelines.
+- **usecases/** — use‑case packets (SPEC.md, LLD.md, plans/, tests/, fixtures/)
 
 ## Component-first layout (no global /spec)
 Each component is a self-contained packet under `/components/<Name>/`:

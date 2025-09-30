@@ -98,6 +98,7 @@ Same tuple ⇒ same canonical plan bytes ⇒ same hash/signature.
       "call": "<operation>",
       "args": {},
       "after": [/* deps, optional */],
+      "gate_id": "gate-A",
       "dry_run": true
     }
   ],
@@ -275,6 +276,7 @@ Availability: 99.9% (Intake/Preview), 99.5% (Execute/Durable).
 ## 10) Repository Mapping (Per Component Packet)
 
 Each components/<Name>/ includes: SPEC.md, LLD.md, schemas/, tests/, code.
+Additionally, usecases/<UseCase>/ includes: SPEC.md, LLD.md, plans/, tests/, fixtures/.
 Intake, ContextRAG, Planner, Signer, PreviewOrchestrator, ExecuteOrchestrator, DurableOrchestrator, PluginRegistry, BindingResolver, PlanLibrary, PlanRetrieval, PlanWriter, Audit.
 GLOBAL_SPEC.md: Intent, Evidence, Preview/Execute wrappers, plan step schema with {mode, role, after, gate_id}.
 

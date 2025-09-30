@@ -10,7 +10,7 @@ Adopt `/components/<Name>/` packets containing:
 - `SPEC.md` — requirements & acceptance
 - `LLD.md` — implementation details (APIs, sequences, data, failure modes)
 - `api/` — routes/controllers/handlers (thin I/O)
-- `service/` — use-cases/orchestration (implements `preview()` and `execute()`)
+- `service/` — component services (implements `preview()` and `execute()`); no cross‑component orchestration or connector bindings
 - `domain/` — pure domain models & invariants (no external deps)
 - `adapters/` — external integrations (HTTP, DB, queues)
 - `schemas/` — component-specific JSON Schemas
