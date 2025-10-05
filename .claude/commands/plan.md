@@ -13,7 +13,7 @@ Act as a planner/scaffolder. You MAY write only documentation, schemas, tests, a
 - Optional: SPEC_SOURCE (absolute path to a Spec Kit spec to promote)
 
 ## Read first (canonical)
-1) CONSTITUTION.md
+1) .specify/memory/constitution.md
 2) docs/architecture/PROJECT_STRUCTURE.md
 3) docs/architecture/GLOBAL_SPEC.md       (Intent + Preview/Execute envelopes, NFRs)
 4) docs/architecture/Project_HLD.md
@@ -232,4 +232,4 @@ def test_preview_wrapper_and_normalized_contract():
 - Only write files listed above under components/<Name>/**.
 - Do not modify executable code (api/, service/, domain/, adapters/) in this command.
 - Do not push to main. Use feature branch only.
-- Follow docs/architecture/GLOBAL_SPEC.md v1 and CONSTITUTION.md.
+- Follow docs/architecture/GLOBAL_SPEC.md v1 and .specify/memory/constitution.md.

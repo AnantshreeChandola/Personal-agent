@@ -19,7 +19,7 @@ Act in **workbench mode**: you will use Spec Kit to draft a spec in its workspac
    Ensure current branch == BRANCH_NAME (feature branch; never main).
 
 2) Read canonical repo rules for content
-   - CONSTITUTION.md (PR rules, no push to main, CI gates)
+   - .specify/memory/constitution.md (PR rules, no push to main, CI gates)
    - docs/architecture/PROJECT_STRUCTURE.md (component-first rules)
    - docs/architecture/GLOBAL_SPEC.md (Intent + Preview/Execute envelopes, NFRs)
    - docs/architecture/Project_HLD.md (system context)

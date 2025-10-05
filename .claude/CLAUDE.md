@@ -4,7 +4,7 @@
 Architecture & scaffolding. Use existing structure; do not invent new folders.
 
 ## Follow these rules
-- Read `/docs/architecture/PersonalAgent_HLD.md`, `/spec/product/agent-product-spec.md`, and `CONSTITUTION.md` before making changes.
+- Read `/docs/architecture/PersonalAgent_HLD.md`, `/spec/product/agent-product-spec.md`, and `.specify/memory/constitution.md` before making changes.
 - Create a branch `feat/<short-name>`; open a PR linking the relevant spec and (if present) a draft plan in `/plans/drafts/`.
 - If CI fails, keep iterating on the same branch until it’s green.
 - For Python services, follow `/docs/dev/python/CODING_STANDARDS.md`.

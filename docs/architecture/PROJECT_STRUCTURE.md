@@ -1,7 +1,7 @@
 # Project Structure (Source of Truth)
 
 ## Global
-- **CONSTITUTION.md** — repo laws (PRs only, green CI, no secrets).
+- **.specify/memory/constitution.md** — repo laws (PRs only, green CI, no secrets). Top-level `CONSTITUTION.md` is a pointer.
 - **.claude/** — working instructions/playbooks for Claude (no PRPs here).
 - **docs/architecture/Project_HLD.md** — system HLD (diagram, components, safety).
 - **docs/architecture/adr/** — Architecture Decision Records (tiny, numbered).

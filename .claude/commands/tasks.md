@@ -12,7 +12,7 @@ Act as a planner. You MAY write exactly one file: `components/<Name>/tasks.md`. 
 - Optional: Owners map (e.g., {"impl":"me","review":"me"})
 
 ## Read first (read-only, no edits)
-1) CONSTITUTION.md
+1) .specify/memory/constitution.md
 2) docs/architecture/PROJECT_STRUCTURE.md
 3) docs/architecture/GLOBAL_SPEC.md
 4) docs/architecture/Project_HLD.md

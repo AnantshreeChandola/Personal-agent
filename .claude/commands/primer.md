@@ -7,7 +7,7 @@ Act as a **read-only** primer. Do **not** modify files, run package installs, or
 
 ## What to read (in this order)
 /user
-1) **CONSTITUTION.md** — repo laws (no push to main, PR must link SPEC/LLD, CI is the gate)
+1) **.specify/memory/constitution.md** — repo laws (no push to main, PR must link SPEC/LLD, CI is the gate)
 2) **docs/architecture/PROJECT_STRUCTURE.md** — component-first layout & rules
 3) **docs/architecture/GLOBAL_SPEC.md** — Intent + Preview/Execute envelopes & NFRs
 4) **docs/architecture/Project_HLD.md** — system diagram, boundaries, flows
@@ -26,7 +26,7 @@ Act as a **read-only** primer. Do **not** modify files, run package installs, or
 - If available, use Serena search to locate key symbols or files. If Serena fails, fall back to `rg`.
 
 ## Output (keep it concise, but precise)
-- **Repo laws (1–3 lines):** The key rules from `CONSTITUTION.md` that affect PRs & CI.
+- **Repo laws (1–3 lines):** The key rules from `.specify/memory/constitution.md` that affect PRs & CI.
 - **Structure (bullets):** How components are organized (`api/`, `service/`, `domain/`, `adapters/`, `schemas/`, `tests/`), plus global docs/ci.
 - **Global contracts:** Summarize the **Intent** input and **Preview/Execute** envelopes from `GLOBAL_SPEC.md`.
 - **Key configs & dependencies:** Call out `pyproject.toml` (or `package.json`), `.claude/settings.json`, CI workflow, and anything notable (e.g., UV usage, Ruff, PyTest).
@@ -39,5 +39,5 @@ Act as a **read-only** primer. Do **not** modify files, run package installs, or
 
 ## Constraints
 - Read-only; no file edits or network installs.
-- Prefer canonical sources: `CONSTITUTION.md` at repo root, `docs/architecture/*`, `components/<Name>/*`.
+- Prefer canonical sources: `.specify/memory/constitution.md`, `docs/architecture/*`, `components/<Name>/*`.
 - Treat `.specify/*` as a **workbench** only; do not consider it the source of truth.
