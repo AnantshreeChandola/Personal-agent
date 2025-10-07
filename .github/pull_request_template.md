@@ -9,7 +9,7 @@ Fill every section below. Delete any “N/A” lines before submitting.
 - 
 
 ## PRP (Plan/PR Proposal)
-- Link: docs/planning/PRP_<name>_<branch>.md  <!-- or write “N/A” -->
+- Link: (optional)  <!-- or write “N/A” -->
 
 ## Components touched
 - [ ] components/<Name>/SPEC.md → link:
@@ -38,10 +38,14 @@ Fill every section below. Delete any “N/A” lines before submitting.
 ---
 
 ### Checklist (required by the Constitution)
-- [ ] PRP linked in `docs/planning/PRP_GLOBAL.md#prp-<kebab-name>` **or** “N/A”
+- [ ] Optional planning notes linked **or** “N/A”
 - [ ] Components touched listed; SPEC/LLD links included
 - [ ] Tests added/updated and **green** (component + system)
 - [ ] Schemas updated and validated (if payloads changed)
 - [ ] Preview uses stubs/mocks; **no secrets** committed
 - [ ] Evidence/artifacts linked (if applicable)
 - [ ] Reviewer(s) assigned
+
+### Safety & Integrity (GLOBAL_SPEC)
+- [ ] Plan signature verified at Preview and Execute
+- [ ] Gate approval token/signature bound to {plan_hash, gate_id, user_id, exp}

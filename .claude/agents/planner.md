@@ -21,4 +21,3 @@ Outputs:
 Rules:
 - No external mutations; no connector execution; same tuple ⇒ same bytes ⇒ same signature
 - Keep component proposals generic and use‑case agnostic; prefer adapters over leaking use‑case terms into domain
-```
