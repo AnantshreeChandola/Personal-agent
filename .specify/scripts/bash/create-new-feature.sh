@@ -45,7 +45,19 @@ git checkout -b "$BRANCH_NAME"
 FEATURE_DIR="$SPECS_DIR/$BRANCH_NAME"
 mkdir -p "$FEATURE_DIR"
 
-TEMPLATE="$REPO_ROOT/.specify/templates/spec-template.md"
+DESC_LOWER=$(echo "$FEATURE_DESCRIPTION" | tr '[:upper:]' '[:lower:]')
+if echo "$DESC_LOWER" | grep -qE '^component:'; then
+  TEMPLATE="$REPO_ROOT/.specify/templates/spec-template-component.md"
+elif echo "$DESC_LOWER" | grep -qE '^use ?case:'; then
+  TEMPLATE="$REPO_ROOT/.specify/templates/spec-template-usecase.md"
+else
+  # Heuristic: if it mentions 'component', pick component; otherwise default to use case
+  if echo "$DESC_LOWER" | grep -q 'component'; then
+    TEMPLATE="$REPO_ROOT/.specify/templates/spec-template-component.md"
+  else
+    TEMPLATE="$REPO_ROOT/.specify/templates/spec-template-usecase.md"
+  fi
+fi
 SPEC_FILE="$FEATURE_DIR/spec.md"
 if [ -f "$TEMPLATE" ]; then cp "$TEMPLATE" "$SPEC_FILE"; else touch "$SPEC_FILE"; fi
 
