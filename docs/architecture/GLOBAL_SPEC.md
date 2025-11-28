@@ -82,7 +82,7 @@ Same tuple ⇒ same canonical plan bytes ⇒ same hash/signature.
     {
       "step": 1,
       "mode": "interactive|durable",
-      "role": "Watcher|Resolver|Booker|Notifier",
+      "role": "Fetcher|Analyzer|Watcher|Resolver|Booker|Notifier",
       "uses": "<tool_id>",
       "call": "<operation>",
       "args": {},
@@ -138,6 +138,26 @@ Same tuple ⇒ same canonical plan bytes ⇒ same hash/signature.
   "scopes": ["shopping.write"]
 }
 ~~~
+
+### 2.8 Runtime Agent Roles
+
+Runtime agents are **asynchronous execution instances** that execute plan steps. Each step spawns a new agent instance (n8n sub-workflow or Temporal activity). Multiple instances of the same role can run concurrently.
+
+**Six roles for responsibility isolation:**
+
+- **Fetcher** — One-time read operations (preview fetches, API calls, data retrieval)
+- **Analyzer** — Data processing, comparison, research, ranking, synthesis
+- **Watcher** — Long-running monitoring (polls, subscriptions, continuous observation)
+- **Resolver** — Disambiguation, user clarification, conflict resolution
+- **Booker** — Writes with idempotency and compensation
+- **Notifier** — Updates, alerts, summaries, progress reports
+
+**Execution model:**
+- Roles are for **responsibility classification**, not concurrency primitives
+- Parallelism comes from **orchestrator logic** (n8n branches, Temporal child workflows)
+- Steps with `after: []` (no dependencies) execute **immediately in parallel**
+- Steps with `after: [1, 2]` wait for dependencies, then execute
+- Resource locks prevent conflicting writes (fine-grained: `resource.entity.write`)
 
 ---
 

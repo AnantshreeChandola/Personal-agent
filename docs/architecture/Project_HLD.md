@@ -93,7 +93,7 @@ Same tuple ⇒ same canonical plan bytes ⇒ same hash/signature.
     {
       "step": 1,
       "mode": "interactive|durable",
-      "role": "Watcher|Resolver|Booker|Notifier",
+      "role": "Fetcher|Analyzer|Watcher|Resolver|Booker|Notifier",
       "uses": "<tool_id>",
       "call": "<operation>",
       "args": {},
@@ -200,47 +200,144 @@ Curates just-enough context from Profile, History, Plan Library, Vector Index, C
 - Presents Preview/choices; on Approve, issues an approval token bound to {plan_hash, gate_id, user_id} with short TTL and single-use semantics.
 
 ### 4.10 Execute Orchestrator (n8n, short jobs) (`components/ExecuteOrchestrator/`)
-- Verifies signature and the gate’s approval token; for each step:
-- mode:"interactive" → run n8n connector nodes through the Binding Resolver; enforce idempotency (Data Store: plan_id:step:arg_hash).
-- mode:"durable" → hand off to Temporal (start workflow), then continue when signaled.
-    Collects Execute wrappers, notifies user, and calls PlanWriter.
+- Verifies signature and the gate's approval token
+- **Uses WorkflowBuilder** to convert plan → n8n workflow with parallel structure
+- Executes n8n workflow (handles parallel branches internally based on `after` dependencies)
+- For each step:
+  - mode:"interactive" → already in workflow, executes via n8n parallel branches
+  - mode:"durable" → hand off to Temporal (start workflow), await signal
+- Enforces idempotency (Data Store: plan_id:step:arg_hash)
+- Collects Execute wrappers, notifies user, and calls PlanWriter
 
 ### 4.11 Binding Resolver (components/BindingResolver/)
 - Small mapping layer (can live inside n8n or as a helper service):
     {uses, call, args} + Registry vR → {node, operation, params} for the n8n node. Keeps flows generic; adding capabilities means editing the Registry, not flows.
 
-### 4.11 Durable Orchestrator (Temporal, long jobs) (`components/DurableOrchestrator/`)
+### 4.12 WorkflowBuilder (`components/WorkflowBuilder/`)
+
+**Purpose:** Convert plan dependency graph → n8n workflow JSON with parallel execution structure.
+
+**Responsibilities:**
+- Parse plan `graph[]` and analyze `after` dependencies
+- Identify parallel-executable steps (no dependencies or shared dependencies)
+- Generate n8n workflow with Split/Merge nodes for parallel branches
+- Convert steps to n8n nodes (via Binding Resolver)
+- Handle approval gates as n8n Wait nodes
+
+**Input:** Signed plan + Registry snapshot
+**Output:** n8n workflow JSON ready for execution
+
+**Integration:** Execute Orchestrator uses WorkflowBuilder before running n8n workflows.
+
+**Details:** See `components/WorkflowBuilder/LLD.md` (created during implementation phase)
+
+### 4.13 Durable Orchestrator (Temporal, long jobs) (`components/DurableOrchestrator/`)
 - Durable workflows for watchers/bookers/notifiers over days/weeks: deterministic core, Activities for I/O, retries/backoff, signals (approve/cancel/reconfigure), queries (status), ContinueAsNew, search attributes (user_id, plan_id, intent).
 
-### 4.13 PlanWriter (`components/PlanWriter/`)
-- **Purpose:** Persist outcomes back to **Plan Library** & **History**; trigger vector re-index.  
+### 4.14 PlanWriter (`components/PlanWriter/`)
+- **Purpose:** Persist outcomes back to **Plan Library** & **History**; trigger vector re-index.
 - **Responsibilities:** map Execute wrappers → normalized facts; **idempotent** writes.
 
-### 4.14 Audit & Observability (`components/Audit/`)
-- **Purpose:** Structured logs, metrics, traces; user/system dashboards.  
+### 4.15 Audit & Observability (`components/Audit/`)
+- **Purpose:** Structured logs, metrics, traces; user/system dashboards.
 - **Responsibilities:** correlate by `plan_id`; SLOs (preview p95, execute p95), retries, error classes; summaries.
 
-### 4.15 (Optional) MemoryHub Façade (`components/MemoryHub/`)
+### 4.16 (Optional) MemoryHub Façade (`components/MemoryHub/`)
 - **Purpose:** One door for memory ops (useful for n8n/tests).  
 - **Endpoints (conceptual):** `GET evidence`, `GET/PUT prefs`, `POST fact`, `forget/export`.  
 - **Note:** delegates to ContextRAG/Profile/History/Plan Library.
 
 ---
 
-## 5) Multi-Agent Model (Roles & Parallelism)
+## 5) Runtime Agent Roles & Asynchronous Orchestration
 
-Use **roles**, not heavyweight bespoke LLMs per task:
+### 5.1 Runtime Agent Model
 
-- **Watcher** — long polling/monitoring (Temporal workflow + read activities).  
-- **Resolver** — disambiguation/low-confidence cases (ask user via n8n or escalate context tier).  
-- **Booker** — writes with idempotency & compensation (activities).  
-- **Notifier** — user/system updates, progress, summaries.
+**Runtime agents** are asynchronous execution instances that execute plan steps. Not just semantic labels—actual workers (n8n sub-workflows or Temporal activities) that:
+- Execute independently and asynchronously
+- Report completion to orchestrator
+- Can run multiple instances concurrently
+- Are classified by role for responsibility isolation
 
-**Coordination rules**
-- Planner tags each step with `{mode, role}`.  
-- Durable Orchestrator assigns **child workflows/activities** per role; run in **parallel** where safe.  
-- Only **one writer** (e.g., Booker) holds a resource write-lock; **Saga** compensates on failure.  
-- Confidence below threshold → emit `needs[]` → n8n asks user or escalates Context tier → re-plan/resume.
+**Agent lifecycle:** spawn (per step) → execute → report → terminate
+
+### 5.2 Six Agent Roles (Responsibility Classification)
+
+- **Fetcher** — One-time read operations
+  - Examples: Preview fetches, API calls, calendar slots, contact lookup
+  - Implementation: n8n HTTP/connector nodes (interactive), Temporal activities (durable)
+
+- **Analyzer** — Data processing, comparison, research
+  - Examples: Compare flight options, rank restaurants, analyze expenses, find overlaps
+  - Implementation: n8n Function/Code nodes, Temporal activities with compute logic
+
+- **Watcher** — Long-running monitoring
+  - Examples: Poll visa slots for days, monitor price drops, watch for emails
+  - Implementation: Temporal workflows with ContinueAsNew, poll activities
+
+- **Resolver** — Disambiguation, user interaction
+  - Examples: "Which John?", choose from options, clarify preferences
+  - Implementation: n8n Wait nodes with webhooks, interactive approval flows
+
+- **Booker** — Writes with idempotency
+  - Examples: Create calendar events, send emails, make purchases, book appointments
+  - Implementation: n8n connector nodes (GCal, Gmail), Temporal activities with idempotency keys
+
+- **Notifier** — Updates and alerts
+  - Examples: Confirm booking, send summaries, progress updates, error notifications
+  - Implementation: n8n Slack/email nodes, Temporal notification activities
+
+### 5.3 Asynchronous Execution Model
+
+**Plan-level concurrency:**
+- Multiple plans execute simultaneously (different `plan_id` values)
+- User A books meeting while User B monitors visa slots
+- No blocking between independent plans
+
+**Step-level concurrency (within a plan):**
+- Steps with `after: []` execute immediately in parallel
+- Steps with `after: [1, 2]` wait for both dependencies, then execute
+- Dependency graph enables DAG-based parallel execution
+
+**Example parallel execution:**
+~~~json
+{
+  "graph": [
+    {"step": 1, "role": "Fetcher", "call": "get_alice_calendar", "after": []},
+    {"step": 2, "role": "Fetcher", "call": "get_bob_calendar", "after": []},
+    {"step": 3, "role": "Analyzer", "call": "find_overlap", "after": [1, 2]},
+    {"step": 4, "role": "Booker", "call": "create_event", "after": [3]}
+  ]
+}
+~~~
+Steps 1 and 2 execute in parallel; step 3 waits for both; step 4 runs after step 3.
+
+### 5.4 Orchestration Mechanisms
+
+**n8n (interactive mode):**
+- WorkflowBuilder converts plan → n8n workflow JSON
+- Parallel branches for steps with no dependencies
+- Merge nodes wait for all branches to complete
+- Split/Merge pattern enables concurrent execution
+
+**Temporal (durable mode):**
+- Child workflows spawned per step
+- Fan-out pattern for parallel execution
+- Signals for coordination and approval
+- Activities for actual I/O operations
+
+### 5.5 Coordination Rules
+
+- Planner tags each step with `{mode, role}` for classification
+- Orchestrators spawn agent instances per step (n8n sub-workflows or Temporal activities)
+- Dependency graph (`after` field) determines execution order
+- **Resource locks** prevent conflicting writes:
+  - Fine-grained: `calendar.alice.write`, `calendar.bob.write` (can run parallel)
+  - Read operations: no locks (parallel reads allowed)
+  - Coarse locks only for rate-limited resources (e.g., `email.send`)
+- **Saga pattern** for compensation on failure
+- **Idempotency** enforced via `plan_id:step:arg_hash` keys
+- Confidence below threshold → emit `needs[]` → n8n asks user or escalates Context tier → re-plan/resume
 
 ---
 
@@ -293,4 +390,47 @@ Each write phase requires the matching gate token; idempotency avoids duplicates
 - 11.3 Visa watcher (durable)
 
 Watchers in Temporal; on slot hold → signal Gate for approval; on approve, book; notify; write-back.
+
+- 11.4 Parallel execution (interactive with dependencies)
+
+**Intent:** "Find meeting time with Alice and Bob"
+
+**Plan:**
+~~~json
+{
+  "plan_id": "01HX...",
+  "graph": [
+    {"step": 1, "mode": "interactive", "role": "Fetcher",
+     "uses": "google.calendar", "call": "list_free_busy",
+     "args": {"user": "alice@example.com"}, "after": []},
+    {"step": 2, "mode": "interactive", "role": "Fetcher",
+     "uses": "google.calendar", "call": "list_free_busy",
+     "args": {"user": "bob@example.com"}, "after": []},
+    {"step": 3, "mode": "interactive", "role": "Analyzer",
+     "uses": "system.analyze", "call": "find_overlap",
+     "args": {}, "after": [1, 2]},
+    {"step": 4, "mode": "interactive", "role": "Resolver",
+     "uses": "system.approval", "call": "confirm_slot",
+     "gate_id": "gate-A", "after": [3]},
+    {"step": 5, "mode": "interactive", "role": "Booker",
+     "uses": "google.calendar", "call": "create_event",
+     "args": {}, "after": [4]}
+  ]
+}
+~~~
+
+**Execution flow:**
+1. WorkflowBuilder converts plan → n8n workflow
+2. Steps 1 and 2 execute in parallel (n8n Split → [Fetch Alice || Fetch Bob] → Merge)
+3. Step 3 executes after merge (Analyzer finds overlapping slots)
+4. Step 4 presents options to user (Wait node for Gate A approval)
+5. Step 5 creates event after approval (Booker with idempotency)
+
+**Timeline:**
+- t=0ms: Steps 1 & 2 start simultaneously
+- t=200ms: Both complete, step 3 starts
+- t=350ms: Step 3 completes, step 4 shows preview to user
+- t=user: User approves (Gate A token issued)
+- t=user+50ms: Step 5 creates event
+
 ---
