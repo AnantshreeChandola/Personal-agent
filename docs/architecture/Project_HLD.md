@@ -194,7 +194,11 @@ Curates just-enough context from Profile, History, Plan Library, Vector Index, C
 - Ed25519 sign/verify over the canonical plan; key rotation & audit; verification happens at Preview/Execute entry.
 
 ### 4.8 Preview Orchestrator (n8n) (`components/PreviewOrchestrator/`)
-- Verifies signature, filters to previewable ops from the Registry, runs connectors (read-only) via Binding Resolver, and returns a Preview wrapper.
+- Verifies signature
+- **Uses WorkflowBuilder** with `mode="preview"` to convert plan → read-only n8n workflow
+- Executes n8n workflow (parallel branches for independent read steps)
+- Only runs `dry_run=true` steps with previewable operations (from Registry)
+- Returns a Preview wrapper with normalized data
 
 ### 4.9 Approval Gate (`components/Approvals/`)
 - Presents Preview/choices; on Approve, issues an approval token bound to {plan_hash, gate_id, user_id} with short TTL and single-use semantics.
@@ -215,7 +219,7 @@ Curates just-enough context from Profile, History, Plan Library, Vector Index, C
 
 ### 4.12 WorkflowBuilder (`components/WorkflowBuilder/`)
 
-**Purpose:** Convert plan dependency graph → n8n workflow JSON with parallel execution structure.
+**Purpose:** Convert plan dependency graph → n8n workflow JSON with parallel execution structure for both preview and execute modes.
 
 **Responsibilities:**
 - Parse plan `graph[]` and analyze `after` dependencies
@@ -223,11 +227,25 @@ Curates just-enough context from Profile, History, Plan Library, Vector Index, C
 - Generate n8n workflow with Split/Merge nodes for parallel branches
 - Convert steps to n8n nodes (via Binding Resolver)
 - Handle approval gates as n8n Wait nodes
+- **Mode-specific filtering:**
+  - `preview` mode: only `dry_run=true` steps + previewable operations (read-only)
+  - `execute` mode: all steps with idempotency enforcement and compensation
 
-**Input:** Signed plan + Registry snapshot
+**API:**
+~~~python
+build_workflow(
+    plan: Plan,
+    registry: Registry,
+    mode: Literal["preview", "execute"]
+) -> N8nWorkflow
+~~~
+
+**Input:** Signed plan + Registry snapshot + mode
 **Output:** n8n workflow JSON ready for execution
 
-**Integration:** Execute Orchestrator uses WorkflowBuilder before running n8n workflows.
+**Integration:**
+- Preview Orchestrator uses `mode="preview"` for read-only workflows
+- Execute Orchestrator uses `mode="execute"` for full execution workflows
 
 **Details:** See `components/WorkflowBuilder/LLD.md` (created during implementation phase)
 
@@ -370,28 +388,330 @@ ContextRAG p95 < 150 ms; Plan Retrieval p95 < 200 ms; Vector top-K < 100 ms.
 Durable flows survive restarts; ContinueAsNew daily or on N events.
 Availability: 99.9% (Intake/Preview), 99.5% (Execute/Durable).
 
-## 10) Repository Mapping (Per Component Packet)
+## 10) Complete End-to-End Flow
+
+**Example: "Book meeting with Alice next week"**
+
+### Phase 1: Intent Formation & Planning
+
+**1. User Input (FastAPI)**
+- User message received via HTTP POST `/api/intake`
+- Intake component maintains session state (Redis)
+- Triggers Readiness Gate → proceeds to planning
+
+**2. Context Gathering (ContextRAG)**
+- Generates embedding for intent (OpenAI embeddings API)
+- Vector search in pgvector for similar past plans
+- Fetches user preferences from PostgreSQL
+- Retrieves recent history
+- Produces typed Evidence[] (≤2KB)
+
+**3. Plan Generation (Planner)**
+- Calls Anthropic Claude API with:
+  - Intent JSON
+  - Evidence[] from ContextRAG
+  - Registry snapshot (available tools)
+  - GLOBAL_SPEC policy version
+- LLM generates deterministic Plan with:
+  - Steps with {mode, role, uses, call, args, after}
+  - Dependency graph (parallel Fetcher steps)
+  - Approval gates (gate-A for slot selection)
+- Returns canonical Plan JSON
+
+**4. Plan Signing (Signer)**
+- Canonicalizes Plan JSON (deterministic serialization)
+- Signs with Ed25519 private key
+- Attaches signature + nonce + timestamp
+
+### Phase 2: Preview Generation
+
+**5. Preview Workflow (n8n)**
+- Preview Orchestrator receives signed plan
+- Verifies Ed25519 signature
+- Calls **WorkflowBuilder** with `mode="preview"`
+- WorkflowBuilder:
+  - Filters to `dry_run=true` steps only
+  - Checks Registry for previewable operations
+  - Generates n8n workflow JSON with parallel branches
+  - Example: Fetch Alice's calendar + Fetch user's calendar in parallel
+- n8n executes workflow:
+  - Spawns parallel branches (Split node)
+  - Calls Google Calendar API (read-only)
+  - Merges results (Merge node)
+  - Analyzer step finds overlapping slots
+- Returns Preview wrapper with normalized time slots
+
+**6. User Review (Frontend)**
+- Preview displayed to user in UI (React/Next.js)
+- Shows available time slots
+- User selects preferred slot
+- Clicks "Approve"
+
+### Phase 3: Approval & Execution
+
+**7. Approval Gate**
+- Frontend sends approval to `/api/approvals/gate-A`
+- Approval Gate component:
+  - Validates plan_hash matches
+  - Generates JWT approval token
+  - Binds: {plan_hash, gate_id: "gate-A", user_id, scopes, exp}
+- Returns token to frontend
+
+**8. Execute Workflow (n8n)**
+- Execute Orchestrator receives plan + approval token
+- Verifies signature + approval token
+- Calls **WorkflowBuilder** with `mode="execute"`
+- WorkflowBuilder:
+  - Includes all steps (not just dry_run)
+  - Generates n8n workflow with:
+    - Parallel Fetcher steps (if any dependencies needed)
+    - Analyzer step (post-merge)
+    - Booker step (create calendar event)
+    - Notifier step (send confirmation)
+- n8n executes workflow:
+  - Checks idempotency (Redis: `plan_id:step:arg_hash`)
+  - If not exists:
+    - Calls Google Calendar API (create event)
+    - Stores result in Redis (TTL: 1 hour)
+    - Sends notification via Slack/email
+  - If exists: returns cached result
+- Returns Execute wrapper with event ID
+
+**9. Persist Outcomes (PlanWriter)**
+- Receives Execute wrappers
+- Writes to Plan Library (PostgreSQL):
+  - Plan + signature + outcome
+  - Success/failure status
+- Writes to History (PostgreSQL):
+  - Normalized facts (PII-light)
+  - "Meeting booked with Alice at 2pm Tuesday"
+- Triggers vector re-indexing:
+  - Generates embedding for completed plan
+  - Stores in pgvector for future retrieval
+
+**10. Audit & Observability**
+- Logs correlated by `plan_id`:
+  - Each component logs: step, role, operation, latency_ms, status
+  - No secrets/PII in logs
+- Metrics emitted:
+  - Preview latency: 650ms (✓ under 800ms p95)
+  - Execute latency: 1.2s (✓ under 2s p95)
+  - ContextRAG latency: 120ms (✓ under 150ms p95)
+
+### Alternative Flow: Long-Running Watcher
+
+**Durable Execution (Temporal)**
+
+For long-running tasks (e.g., "Monitor visa slots for next 2 weeks"):
+
+1. Plan includes step with `mode: "durable"`, `role: "Watcher"`
+2. Execute Orchestrator hands off to Temporal:
+   - Starts Temporal workflow: `WatcherWorkflow.run(plan_id, task_params)`
+   - Workflow runs for days/weeks
+   - Polls external API every 6 hours (Temporal Activity)
+   - Uses ContinueAsNew pattern after 24 hours
+3. When slot detected:
+   - Workflow sends Signal to Approval Gate
+   - User receives notification
+   - User approves → workflow continues
+   - Booker activity books the slot
+   - Notifier activity confirms
+4. PlanWriter persists outcome
+
+### Technology Flow Summary
+
+```
+User → FastAPI → PostgreSQL (session)
+     ↓
+FastAPI → OpenAI (embeddings) → pgvector (similarity search)
+     ↓
+FastAPI → Anthropic Claude (planning) → Plan JSON
+     ↓
+FastAPI → cryptography (Ed25519 sign)
+     ↓
+FastAPI → WorkflowBuilder (Python) → n8n workflow JSON
+     ↓
+n8n → Google Calendar API / Slack API / etc.
+     ↓
+n8n → Redis (idempotency check)
+     ↓
+n8n → PostgreSQL (Plan Library, History)
+     ↓
+PostgreSQL → pgvector (re-index)
+
+Alternative (Durable):
+FastAPI → Temporal (start workflow)
+     ↓
+Temporal → Activities (poll external APIs)
+     ↓
+Temporal → Signal → FastAPI (approval needed)
+     ↓
+Temporal → Activities (execute booking)
+```
+
+## 11) Tech Stack
+
+### Core Backend
+- **Python 3.11+** — Primary language for all components
+  - FastAPI — API framework (async/await)
+  - Pydantic v2 — Data validation and serialization
+  - SQLAlchemy — Database ORM (async)
+  - asyncpg — PostgreSQL async driver
+  - aioredis — Redis async client
+  - cryptography — Ed25519 signing
+  - UV — Package manager
+
+### Orchestration & Workflows
+- **n8n (self-hosted)** — Interactive workflow orchestration
+  - Node.js runtime
+  - Docker deployment
+  - Webhook triggers
+  - Connector nodes (Google, Slack, HTTP, etc.)
+- **Temporal (Temporal Cloud or self-hosted)** — Durable workflow engine
+  - temporal-python-sdk
+  - Go runtime (Temporal server)
+  - PostgreSQL backend (for Temporal state)
+
+### Data Storage
+- **PostgreSQL 16** — Primary database
+  - pgvector extension — Vector similarity search
+  - User profiles, preferences, consents
+  - Plan Library (plans + signatures + outcomes)
+  - History (normalized facts, PII-light)
+  - Vector embeddings storage
+- **Redis 7** — Cache and idempotency
+  - Idempotency keys (`plan_id:step:arg_hash`)
+  - Session state
+  - Rate limiting
+  - TTL-based caching
+
+### AI/LLM
+- **Anthropic Claude API** — Planning (deterministic, temperature=0)
+  - Model: claude-3-5-sonnet-20241022
+  - Direct SDK (no LangChain framework)
+  - Structured outputs (JSON mode or tool use)
+- **OpenAI API** — Embeddings only
+  - Model: text-embedding-3-small
+  - Vector generation for semantic search
+- **No LangChain** — Direct API calls for simplicity and control
+
+### Frontend (Optional)
+- **React / Next.js** — Approval UI, preview display
+  - TypeScript
+  - Tailwind CSS
+  - API integration via fetch/axios
+
+### Infrastructure & Deployment
+- **Docker** — Containerization
+  - Dockerfile for each component
+  - Docker Compose for local development
+  - Multi-stage builds for production
+- **GitHub Actions** — CI/CD
+  - Automated testing (pytest)
+  - Schema validation
+  - Docker image builds
+  - Deployment automation
+- **Cloud Provider** — (AWS/GCP/Azure)
+  - Managed PostgreSQL (RDS/Cloud SQL)
+  - Managed Redis (ElastiCache/Memorystore)
+  - Container orchestration (ECS/Cloud Run/AKS)
+  - Object storage (S3/GCS/Blob Storage) for artifacts
+
+### Testing & Quality
+- **pytest** — Testing framework
+  - Unit tests
+  - Integration tests
+  - Async test support (pytest-asyncio)
+  - Fixtures and mocking
+- **ruff** — Linter and formatter
+- **mypy** — Static type checking
+- **Coverage.py** — Code coverage reporting
+
+### Observability
+- **Structured Logging** — JSON logs
+  - Python logging module
+  - Correlation via plan_id
+  - No PII in logs
+- **Metrics** — (Prometheus/Grafana or cloud-native)
+  - Latency (p95, p99)
+  - Error rates
+  - Step execution times
+  - Token usage (LLM costs)
+- **Tracing** — (Optional: LangSmith or OpenTelemetry)
+  - LLM call tracing
+  - Distributed tracing across components
+
+### Security & Cryptography
+- **Ed25519** — Plan signing/verification
+  - cryptography library (Python)
+  - Key rotation support
+- **JWT** — Approval tokens
+  - PyJWT library
+  - Short TTL (15 minutes)
+  - Single-use semantics
+- **OAuth2/OpenID Connect** — User authentication (future)
+
+### Utilities
+- **NetworkX** — Graph algorithms (WorkflowBuilder dependency analysis)
+- **httpx** — HTTP client (async)
+- **ulid-py** — ULID generation (plan_id, user_id)
+- **python-json-logger** — Structured logging
+
+### Development Tools
+- **VS Code** — IDE (with Python, Docker extensions)
+- **Postman/Thunder Client** — API testing
+- **pgAdmin** — PostgreSQL GUI
+- **Redis Insight** — Redis GUI
+- **n8n UI** — Workflow visualization
+
+### Architecture Decision Rationale
+
+**Why no LangChain?**
+- Your architecture uses **one-shot planning** (single LLM call), not iterative agent loops
+- Runtime agents are **deterministic executors**, not LLM-powered decision makers
+- Direct API calls provide better control, simplicity, and debuggability
+- Custom ContextRAG implementation needed for tier-based budgeting and privacy
+
+**Why n8n + Temporal dual runtime?**
+- **n8n**: Best for short, synchronous, connector-based workflows (< 15 min)
+- **Temporal**: Best for long-running, stateful, resumable workflows (hours/days/weeks)
+- Separation of concerns: interactive vs durable execution
+
+**Why pgvector over dedicated vector DB?**
+- Single database (PostgreSQL) for relational + vector data
+- Simpler operations (no separate vector DB to manage)
+- Good enough for <1M vectors
+- Upgrade path to Pinecone/Qdrant if needed later
+
+**Why FastAPI over Django?**
+- Async/await native support
+- Lightweight and modern
+- Better performance for I/O-bound operations
+- Excellent Pydantic integration
+- Simpler for API-focused architecture
+
+## 12) Repository Mapping (Per Component Packet)
 
 Each components/<Name>/ includes: SPEC.md, LLD.md, schemas/, tests/, code.
 Additionally, usecases/<UseCase>/ includes: SPEC.md, LLD.md, plans/, tests/, fixtures/.
 Intake, ContextRAG, Planner, Signer, PreviewOrchestrator, ExecuteOrchestrator, DurableOrchestrator, PluginRegistry, BindingResolver, PlanLibrary, PlanRetrieval, PlanWriter, Audit.
 GLOBAL_SPEC.md: Intent, Evidence, Preview/Execute wrappers, plan step schema with {mode, role, after, gate_id}.
 
-## 11) End-to-End Examples (Conceptual)
-- 11.1 Meeting (interactive)
+## 13) End-to-End Examples (Conceptual)
+- 13.1 Meeting (interactive)
 
 Intent → ContextRAG → Plan (list_free_busy → Gate A approve slot → create_event) → Preview (read) → Gate A token → Execute (write) → PlanWriter/Audit.
 
-- 11.2 Shopping (HITL multi-gate)
+- 13.2 Shopping (HITL multi-gate)
 
 Search/rank → Gate A (choose shortlist) → add_to_cart → Gate B (cart review) → purchase.
 Each write phase requires the matching gate token; idempotency avoids duplicates.
 
-- 11.3 Visa watcher (durable)
+- 13.3 Visa watcher (durable)
 
 Watchers in Temporal; on slot hold → signal Gate for approval; on approve, book; notify; write-back.
 
-- 11.4 Parallel execution (interactive with dependencies)
+- 13.4 Parallel execution (interactive with dependencies)
 
 **Intent:** "Find meeting time with Alice and Bob"
 
