@@ -1,756 +1,986 @@
-# Personal Agent — High-Level Architecture (HLD) v3.4
-_Context-aware • Preview-first • Signed plans • Human-approved • **Durable multi-agent** execution_
+# Personal Agent — High-Level Design (HLD) v4.0
+_Preview-first • Human-approved • Deterministic planning • Multi-agent execution_
 
-**Purpose:** Single source of truth for the system’s components, contracts, and responsibilities.  
-**Scope:** Conceptual architecture only — **no API routes** here. Each component owns its own SPEC/LLD.
-
----
-
-## 0) Architecture at a Glance
-
-~~~mermaid
-flowchart LR
- U[User] --> IN[Intake & Reason]
-  IN --> RAG((ContextRAG: prefs/history/exemplars))
-  IN --> PLIB[Plan Library]
-  PLIB --> RET[Retrieve & Score Plans]
-  IN --> REG[Plugin Registry- n8n bindings]
-  REG --> SEL[Select Tools]
-  SEL --> PLAN[Planner dry_run plan]
-  PLAN --> SIG[Signer Ed25519]
-  SIG --> PREV[Preview Orchestrator n8n, read-only]
-  PREV -->|Preview card + evidence| U
-  U -->|Approve Gate A/B/…| GATE[Approval Gates]
-  GATE --> EXE[n8n Execute short jobs via connectors]
-  GATE --> DUR[Temporal Durable Orchestrator long jobs]
-  EXE --> BIND[Binding Resolver plan → n8n node params]
-  EXE --> CONN[n8n Connector Nodes GCal/Gmail/HTTP/Slack…]
-  DUR --> ACT[Temporal Activities HTTP/SDK calls as needed]
-  CONN --> AUD[Audit & Metrics]
-  ACT --> AUD
-  CONN --> PW[PlanWriter → Plan Library + History]
-  ACT --> PW
-  AUD --> U
-  PW --> RAG
-~~~
-
-**Two runtimes**
-- **n8n** — interactive glue (Preview card, approvals, short synchronous steps).  
-- **Temporal** — **durable engine** for long-running/stateful work (poll/sleep/retry/fan-out/signals/compensation).
+**Purpose:** System architecture overview with clear component responsibilities and real-world examples.
+**Audience:** Developers, architects, and stakeholders.
 
 ---
 
-## 1) Core Principles
+## Architecture Overview
 
-- **Preview-first safety:** Every flow produces a **side-effect-free Preview**; writes happen **only after** explicit approval.  
-- **Deterministic planning:** Planner is **stateless**; the plan is canonicalized and **Ed25519-signed** before execution.  
-- **Context engineering:** Fetch **just enough** context as tiny, typed **`evidence[]`** (tiers), never raw blobs.  
-- **Separation of concerns:** Orchestrators orchestrate; n8n connectors perform I/O; Temporal adds durability.  
-- **Auditability:** Correlate everything on `plan_id`; store outcomes and derived facts, not raw private content.
+```
+User Request → Preview → Approval → Execute → Learn
+     ↓           ↓          ↓          ↓        ↓
+  [Intent]   [Show Me]  [Confirm]  [Do It]  [Remember]
+```
+
+### Core Idea
+1. **Never do anything without showing the user first** (Preview-first safety)
+2. **Plans are deterministic and signed** (Same inputs → same plan → same signature)
+3. **Two execution modes** for different job types:
+   - **n8n**: Short jobs (< 15 min) like booking meetings, sending emails
+   - **Temporal**: Long jobs (hours/days) like monitoring visa slots, watching prices
+
+### Key Innovation
+**Preview State Caching**: User choices made during preview are reused during execution—no need to repeat steps.
+
+**Example**: Shopping flow
+- Preview: Search 10 sweaters → User picks one
+- Execute: Only buy that sweater (skip the search)
 
 ---
 
-## 2) Canonical Contracts (Source of Truth)
+## 1) System Layers
 
-### 2.0 Deterministic Inputs (Planner)
-The Planner is a pure function of this frozen tuple:
-- **Intent vN** (finalized, versioned)
-- **Evidence vK** (from ContextRAG; small, typed)
-- **Registry vR** (connector catalog snapshot)
-- **Policy vC** (GLOBAL_SPEC/config version)
-Same tuple ⇒ same canonical plan bytes ⇒ same hash/signature.
+The system has **4 layers** that work together:
 
-### 2.1 Intent (Intake → Planner)
-~~~json
+### Layer 1: Memory & Persistence
+**What it does**: Stores everything the system knows
+- **ProfileStore**: Your stable preferences (work hours, meeting duration)
+- **History**: What you've done before ("usually meets Alice on Tuesdays")
+- **VectorIndex**: Finds similar situations by meaning
+- **PlanLibrary**: Reusable successful plans
+
+**Example**: When you say "book a meeting," the system remembers you prefer 30-minute meetings at 10 AM.
+
+### Layer 2: Domain Services
+**What it does**: Understands your request and builds a plan
+- **Intake**: Figures out what you want across multiple messages
+- **ContextRAG**: Gathers relevant context (≤2KB, not your entire history)
+- **Planner**: Creates a step-by-step plan (deterministic, signed)
+- **PluginRegistry**: Knows what tools are available (Google Calendar, Slack, etc.)
+
+**Example**: "Book meeting with Alice" → Intent + Context → Plan with 4 steps
+
+### Layer 3: Orchestration
+**What it does**: Previews and executes plans safely
+- **PreviewOrchestrator**: Shows you what will happen (no side effects)
+- **ApprovalGate**: Waits for your confirmation
+- **ExecuteOrchestrator**: Does the actual work (n8n workflows)
+- **DurableOrchestrator**: Handles long-running tasks (Temporal workflows)
+
+**Example**: Shows you 3 time slots → You pick one → Creates the calendar event
+
+### Layer 4: API & Frontend
+**What it does**: Your interface to the system
+- FastAPI endpoints for all interactions
+- React/Next.js UI for approvals and previews
+
+---
+
+## 2) How It Works: Complete Example
+
+**User Request**: "Book a meeting with Alice next week"
+
+### Step 1: Understanding (Intake + ContextRAG)
+```
+User: "Book a meeting with Alice next week"
+  ↓
+Intake: Parses intent → "schedule_meeting"
+  ↓
+ContextRAG: Gathers context
+  - Preference: "30-minute meetings"
+  - History: "Usually meets Alice on Tuesdays at 10 AM"
+  - Contact: "alice@company.com"
+  ↓
+Intent + Evidence → Ready for planning
+```
+
+### Step 2: Planning (Planner + Signer)
+```
+Planner receives:
+  - Intent: "schedule_meeting with Alice next week"
+  - Evidence: [30min preference, Tuesday pattern, Alice's email]
+  - Available tools: Google Calendar, Slack
+
+Creates Plan:
+  Step 1 (Fetcher): Get Alice's availability  [parallel]
+  Step 2 (Fetcher): Get your availability      [parallel]
+  Step 3 (Analyzer): Find overlapping slots   [after 1,2]
+  Step 4 (Resolver): User picks slot          [gate-A]
+  Step 5 (Booker): Create calendar event      [after 4]
+  Step 6 (Notifier): Send confirmation        [after 5]
+
+Signer: Signs plan with Ed25519
+  → Plan hash: "sha256:abc123..."
+  → Signature: "base64:xyz..."
+```
+
+### Step 3: Preview (PreviewOrchestrator)
+```
+PreviewOrchestrator:
+  ✓ Verifies plan signature
+  ✓ Runs steps 1-3 in READ-ONLY mode
+
+n8n workflow executes:
+  [Fetch Alice's calendar] ──┐
+                             ├→ [Find overlap] → Results
+  [Fetch your calendar]   ───┘
+
+Preview shows:
+  Option 1: Tuesday 10:00-10:30 ✓ (Alice's usual time)
+  Option 2: Thursday 14:00-14:30
+  Option 3: Friday 11:00-11:30
+
+User selects: Option 1
+```
+
+### Step 4: Approval (ApprovalGate)
+```
+User clicks "Approve Option 1"
+  ↓
+ApprovalGate:
+  - Validates plan_hash matches
+  - Creates approval token (JWT, 15min TTL)
+  - Caches preview state:
+    {
+      "selected_slot": "Tuesday 10:00-10:30",
+      "attendees": ["alice@company.com"],
+      "preview_results": { ... }
+    }
+  ↓
+Returns token: "jwt:eyJ..."
+```
+
+### Step 5: Execute (ExecuteOrchestrator)
+```
+ExecuteOrchestrator:
+  ✓ Verifies signature
+  ✓ Verifies approval token
+  ✓ Retrieves cached preview state (no need to re-fetch calendars!)
+
+Skips steps 1-3 (already done in preview)
+
+Executes step 5:
+  - Checks idempotency key: "plan_id:5:args_hash"
+  - Not found → Proceeds
+  - Calls Google Calendar API: create_event(
+      summary: "Meeting with Alice",
+      start: "2025-01-14T10:00:00-06:00",
+      end: "2025-01-14T10:30:00-06:00",
+      attendees: ["alice@company.com"]
+    )
+  - Stores result: event_id = "gcal_123456"
+
+Executes step 6:
+  - Sends Slack message: "✓ Meeting booked with Alice, Tue Jan 14 at 10 AM"
+```
+
+### Step 6: Learning (PlanWriter + Audit)
+```
+PlanWriter:
+  - Saves to Plan Library:
+    - Plan + signature + outcome (success)
+    - Embedding for future similarity search
+
+  - Saves to History:
+    - "Booked 30min meeting with Alice on Tuesday 10 AM"
+    - (PII-light, derived fact only)
+
+Audit:
+  - Logs all steps with plan_id correlation
+  - Metrics: Preview: 650ms, Execute: 1.2s ✓
+  - No secrets/PII in logs
+```
+
+---
+
+## 3) Component Details
+
+Below are the 16 core components organized by layer. Each will have its own `SPEC.md` and `LLD.md` during implementation.
+
+### Memory Layer (4 components)
+
+#### ProfileStore
+**What it does**: Stores your stable preferences and consent settings
+**Example data**:
+- "Work hours: 9 AM - 5 PM CT"
+- "Default meeting duration: 30 minutes"
+- "Privacy consent: Tier 3 enabled"
+
+**Technology**: PostgreSQL (profiles table, consents table)
+
+#### History
+**What it does**: Remembers what you've done (normalized, PII-light facts)
+**Example data**:
+- "2024-12-01: Booked 30min meeting with Alice at 10 AM"
+- "Usually schedules meetings on Tuesdays"
+
+**Technology**: PostgreSQL (history table with user_id index)
+
+**Note**: This stores *structured facts*, not raw emails or messages.
+
+#### VectorIndex
+**What it does**: Finds similar past situations by semantic meaning
+**Example query**: "Find times I've booked meetings with executives"
+**Technology**: PostgreSQL with pgvector extension (HNSW index)
+
+#### PlanLibrary
+**What it does**: Stores all past plans with signatures and outcomes
+**Example data**:
+- Plan: "schedule_meeting" → Success (event_id: gcal_123)
+- Plan: "book_flight" → Failed (card declined)
+
+**Technology**: PostgreSQL (plans table, indexed by intent type and success)
+
+---
+
+### Domain Layer (6 components)
+
+#### Intake
+**What it does**: Understands what you want across multiple messages
+**Example conversation**:
+```
+User: "I need to meet with Alice"
+Intake: [collecting info, not ready to plan]
+
+User: "Next week works"
+Intake: [still collecting, asks follow-up]
+
+User: "Tuesday at 10 AM"
+Intake: [ready! triggers planning]
+```
+
+**Output**: Intent JSON with entities and constraints
+
+#### ContextRAG
+**What it does**: Gathers relevant context from memory (tiny, typed, budget-limited)
+**Input**: Intent: "schedule_meeting with Alice"
+**Process**:
+1. Vector search for similar past meetings
+2. Fetch Alice's contact info
+3. Fetch user preferences (meeting duration)
+4. Recent history with Alice
+
+**Output**: ≤2KB of typed Evidence items (not raw data!)
+
+**Why small?**: LLM context window is expensive; we only send what's needed.
+
+#### Planner
+**What it does**: Creates a deterministic step-by-step plan
+**Input**: Intent + Evidence + Available tools
+**Process**: Calls Claude API (temperature=0) to generate plan
+**Output**: Plan graph with steps, dependencies, and roles
+
+**Key feature**: Same inputs always produce same plan (deterministic)
+
+#### Signer
+**What it does**: Cryptographically signs plans to prevent tampering
+**Process**:
+1. Canonicalize plan JSON (sort keys, remove whitespace)
+2. Hash with SHA-256
+3. Sign with Ed25519 private key
+
+**Verification**: PreviewOrchestrator and ExecuteOrchestrator verify signature before execution
+
+#### PluginRegistry
+**What it does**: Source of truth for what tools are available
+**Example entry**:
+```json
 {
-  "intent": "<action>",
-  "entities": {},
-  "constraints": {},
-  "tz": "America/Chicago",
-  "user_id": "<uuid>",
-  "context_budget": 1
+  "tool_id": "google.calendar",
+  "operations": {
+    "list_free_busy": {
+      "n8n_node": "Google Calendar",
+      "previewable": true,
+      "scopes": ["calendar.read"],
+      "idempotent": true
+    },
+    "create_event": {
+      "n8n_node": "Google Calendar",
+      "previewable": false,
+      "scopes": ["calendar.write"],
+      "idempotent": true,
+      "compensation": "delete_event"
+    }
+  }
 }
-~~~
+```
 
-### 2.2 Evidence Item (ContextRAG → Planner; small & typed)
-~~~json
+**Why important**: Adding new capabilities only requires editing the Registry, not the orchestrators.
+
+#### PlanWriter
+**What it does**: Persists execution results back to memory
+**Process**:
+1. Receives Execute wrappers (outcomes)
+2. Writes to Plan Library (plan + outcome)
+3. Writes to History (derived facts)
+4. Triggers vector re-indexing
+
+**Example**: "Meeting booked" → History + Plan Library + Vector embedding
+
+---
+
+### Orchestration Layer (5 components)
+
+#### WorkflowBuilder
+**What it does**: Converts plan dependency graph → n8n workflow JSON
+**Input**: Plan + mode ("preview" or "execute")
+**Output**: n8n workflow with parallel execution structure
+
+**Example**:
+```
+Plan steps:
+  Step 1: Fetch Alice's calendar [after: []]
+  Step 2: Fetch your calendar   [after: []]
+  Step 3: Find overlap          [after: [1, 2]]
+
+n8n workflow:
+  Split → [Step 1 || Step 2] → Merge → Step 3
+```
+
+**Modes**:
+- `preview`: Only dry_run steps, read-only operations
+- `execute`: All steps, with idempotency and compensation
+
+#### PreviewOrchestrator
+**What it does**: Shows you what will happen (no side effects!)
+**Process**:
+1. Verifies plan signature
+2. Calls WorkflowBuilder with mode="preview"
+3. Executes n8n workflow (read-only)
+4. Returns Preview wrapper with results
+
+**Safety**: Only runs operations marked `previewable: true` in Registry
+
+#### ApprovalGate
+**What it does**: Waits for your confirmation and issues approval tokens
+**Process**:
+1. Shows preview results to user
+2. On approve: Creates JWT token (15min TTL)
+3. Binds token to: {plan_hash, gate_id, user_id, scopes}
+4. **Caches preview state** (user selections, search results)
+
+**Multi-gate support**: Shopping flow can have gate-A (choose item), gate-B (review cart), gate-C (confirm purchase)
+
+**Preview state caching** (NEW):
+```python
+# Token includes cached preview results
 {
-  "type": "preference|history|contact|plan|exemplar",
-  "key": "meeting_duration_min",
-  "value": 30,
-  "confidence": 0.82,
-  "source_ref": "kv:prefs/duration",
-  "ttl_days": 365
+  "token": "jwt:eyJ...",
+  "plan_hash": "sha256:abc...",
+  "preview_state": {
+    "selected_product": "sweater-1",
+    "search_results": [...],
+    "user_choices": {...}
+  }
 }
-~~~
+```
 
-### 2.3 Plan (deterministic; supports HITL gates)
-~~~json
+#### ExecuteOrchestrator
+**What it does**: Does the actual work (writes to external systems)
+**Process**:
+1. Verifies signature + approval token
+2. **Retrieves cached preview state** (skip repeated steps!)
+3. Calls WorkflowBuilder with mode="execute"
+4. Executes n8n workflow with:
+   - Idempotency checks (plan_id:step:arg_hash)
+   - Resource locking (prevent conflicts)
+   - Compensation on failure (undo operations)
+5. Returns Execute wrappers
+
+**Preview state reuse**:
+- Steps marked `execute_mode: "preview_only"` are skipped
+- Template args resolved from cached state
+- Example: `product_id: "{{preview.cached_state.selected_product}}"`
+
+#### DurableOrchestrator
+**What it does**: Handles long-running tasks (hours/days/weeks)
+**Examples**:
+- Monitor visa appointment slots for 2 weeks
+- Watch flight prices for best deal
+- Poll API every 6 hours for availability
+
+**Technology**: Temporal workflows
+- Deterministic workflow core
+- Activities for I/O operations
+- ContinueAsNew pattern (daily reset)
+- Signals for approval/cancellation
+- Retries with exponential backoff
+
+**Example workflow**:
+```python
+async def visa_watcher_workflow(plan_id, params):
+    while slots_not_found:
+        result = await check_slots_activity()  # I/O
+        if result.has_slots:
+            await send_signal_to_approval_gate(result)
+            approval = await wait_for_signal(timeout=24h)
+            if approval:
+                await book_slot_activity(result.slot_id)
+                break
+        await asyncio.sleep(6 * 3600)  # 6 hours
+
+        # Reset workflow to avoid history bloat
+        if elapsed > 24h:
+            continue_as_new(plan_id, params)
+```
+
+---
+
+### Utilities (1 component)
+
+#### Audit & Observability
+**What it does**: Tracks everything for debugging and analytics
+**Logs**: All steps with plan_id correlation (no secrets/PII)
+**Metrics**: Latency (p95, p99), error rates, token usage
+**Dashboards**: User-facing (execution status) + System (SLOs)
+
+---
+
+## 4) Runtime Agent Roles (Responsibility Classification)
+
+Runtime agents are **asynchronous workers** that execute individual plan steps. They're not just labels—they're actual n8n sub-workflows or Temporal activities.
+
+### The 6 Roles
+
+#### 1. Fetcher (Read Operations)
+**What it does**: One-time data retrieval
+**Examples**:
+- Get calendar availability
+- Fetch contact info
+- Look up product details
+- Check flight prices
+
+**Implementation**: n8n HTTP/connector nodes, Temporal activities
+
+#### 2. Analyzer (Data Processing)
+**What it does**: Compare, rank, research, synthesize
+**Examples**:
+- Find overlapping calendar slots
+- Rank restaurant options by price/rating
+- Compare flight routes
+- Calculate expense totals
+
+**Implementation**: n8n Function nodes, Temporal activities with compute logic
+
+#### 3. Watcher (Long-Running Monitoring)
+**What it does**: Continuous observation over time
+**Examples**:
+- Poll visa slots for 2 weeks
+- Monitor price drops daily
+- Watch for email replies
+- Track package delivery
+
+**Implementation**: Temporal workflows with ContinueAsNew pattern
+
+#### 4. Resolver (User Interaction)
+**What it does**: Disambiguation and clarification
+**Examples**:
+- "Which John did you mean?"
+- "Pick from these 3 options"
+- "Confirm this choice"
+
+**Implementation**: n8n Wait nodes with webhooks, approval flows
+
+#### 5. Booker (Write Operations)
+**What it does**: Create, update, or delete with idempotency
+**Examples**:
+- Create calendar events
+- Send emails
+- Make purchases
+- Book appointments
+
+**Implementation**: n8n connector nodes, Temporal activities with idempotency keys
+
+**Key requirement**: Must support compensation (undo) if something fails
+
+#### 6. Notifier (Updates and Alerts)
+**What it does**: Keep user informed
+**Examples**:
+- "✓ Meeting booked"
+- "Visa slot found! Approve to book?"
+- Progress updates
+- Error notifications
+
+**Implementation**: n8n Slack/email nodes, Temporal notification activities
+
+### How They Execute
+
+**Parallel execution** (steps with no dependencies):
+```
+Step 1 (Fetcher): Get Alice's calendar  [after: []]
+Step 2 (Fetcher): Get Bob's calendar    [after: []]
+↓
+Both execute simultaneously
+```
+
+**Sequential execution** (steps with dependencies):
+```
+Step 3 (Analyzer): Find overlap  [after: [1, 2]]
+↓
+Waits for steps 1 and 2 to complete first
+```
+
+**Real example timeline**:
+- t=0ms: Steps 1 & 2 start in parallel
+- t=200ms: Both complete
+- t=201ms: Step 3 starts (has all required data)
+- t=350ms: Step 3 completes
+
+---
+
+## 5) Safety and Reliability
+
+### Preview-First Safety Model
+**Rule**: Never execute anything without showing the user first
+
+**How it works**:
+1. **Preview phase**: Read-only operations, no side effects
+   - Fetch data from APIs (calendars, contacts, products)
+   - Show user what will happen
+   - User can cancel at any time
+
+2. **Execute phase**: Only runs after explicit approval
+   - Requires valid approval token (JWT, 15min TTL)
+   - Checks idempotency (prevents duplicate operations)
+   - Supports compensation (undo if something fails)
+
+### Deterministic Planning
+**Guarantee**: Same inputs always produce the same plan
+
+**Inputs** (frozen tuple):
+- Intent (finalized user request)
+- Evidence (context from ContextRAG, ≤2KB)
+- Registry (available tools snapshot)
+- Policy (GLOBAL_SPEC version)
+
+**Process**:
+1. Planner calls Claude API with temperature=0
+2. Canonicalize plan JSON (sort keys, deterministic serialization)
+3. Sign with Ed25519 (cryptographic signature)
+4. Hash: SHA-256 of canonical plan bytes
+
+**Benefits**:
+- Same request tomorrow = same plan
+- Tamper detection (signature verification)
+- Auditability (reproducible plans)
+
+### Idempotency (No Duplicate Operations)
+**Problem**: What if the network fails after creating a calendar event? Retry would create duplicates.
+
+**Solution**: Idempotency keys
+```python
+# Before executing step 5
+key = f"{plan_id}:5:{hash(args)}"
+if redis.exists(key):
+    return redis.get(key)  # Return cached result
+
+# Execute operation
+result = google_calendar.create_event(...)
+
+# Cache result (1 hour TTL)
+redis.setex(key, 3600, result)
+```
+
+**Result**: Safe to retry—same operation never executes twice
+
+### Compensation (Undo on Failure)
+**Problem**: Step 3 fails after steps 1 and 2 succeeded. Need to undo.
+
+**Solution**: Registry declares compensation operations
+```json
 {
-  "plan_id": "<ulid>",
-  "intent": {},
+  "create_event": {
+    "compensation": "delete_event"
+  },
+  "send_email": {
+    "compensation": null  // Can't unsend email
+  }
+}
+```
+
+**Process**:
+1. Step 1 succeeds → Store undo info
+2. Step 2 succeeds → Store undo info
+3. Step 3 fails → Execute compensations in reverse order
+   - Undo step 2
+   - Undo step 1
+
+**Pattern**: Saga pattern for distributed transactions
+
+### Resource Locking (Prevent Conflicts)
+**Problem**: Two plans try to book the same calendar slot simultaneously
+
+**Solution**: Fine-grained locks
+```python
+# Plan A wants to book Alice's calendar
+await acquire_lock("calendar.alice.write")
+try:
+    create_event(...)
+finally:
+    release_lock("calendar.alice.write")
+
+# Plan B waits until Plan A releases the lock
+```
+
+**Granularity**:
+- Fine-grained: `calendar.alice.write` vs `calendar.bob.write` (can run parallel)
+- Read operations: No locks needed
+- Coarse locks: Only for rate-limited resources (`email.send`)
+
+### Privacy and Consent
+**Tier-based context policy**:
+- **Tier 1**: Session only (current conversation)
+- **Tier 2**: Stable preferences (work hours, duration)
+- **Tier 3**: Recent history (past 30 days)
+- **Tier 4**: Live signals (free/busy, cross-app data)
+- **Tier 5**: Private content (derived facts only, explicit consent)
+
+**Rules**:
+- Never store raw PII (emails, messages)
+- Store derived facts only ("usually meets Alice on Tuesdays")
+- TTL enforcement (Tier 3 expires after 30 days)
+- Forget/export on user request
+
+### Observability
+**Correlation**: Every log entry includes `plan_id`
+```json
+{
+  "plan_id": "01HX...",
+  "step": 5,
+  "role": "Booker",
+  "operation": "create_event",
+  "latency_ms": 234,
+  "status": "success"
+}
+```
+
+**No secrets in logs**: API keys, tokens, passwords never logged
+
+**Metrics**:
+- Preview latency: p95 < 800ms
+- Execute latency: p95 < 2s
+- Error rates by component
+- LLM token usage (cost tracking)
+
+---
+
+## 6) Multi-Gate Approvals (Shopping Example)
+
+**Scenario**: "Buy a blue sweater under $50"
+
+### Why Multiple Gates?
+Complex tasks need multiple approval points:
+- Gate A: Choose which product
+- Gate B: Review cart before purchase
+- Gate C: Confirm final payment
+
+### How It Works
+
+**Step 1: Preview & Gate A (Product Selection)**
+```
+Plan step 1 (Fetcher): Search Amazon for blue sweaters
+  → Results: 47 products
+
+Plan step 2 (Resolver): User picks one  [gate_id: "gate-A"]
+  → User selects: "Cozy Blue Sweater - $45"
+```
+
+**ApprovalGate A**:
+- Issues token with `gate_id: "gate-A"`
+- Caches preview state:
+  ```json
+  {
+    "selected_product": "sweater-1",
+    "price": 45,
+    "search_results": [...]
+  }
+  ```
+
+**Step 2: Gate B (Cart Review)**
+```
+Plan step 3 (Booker): Add to cart  [gate_id: "gate-B"]
+  → Preview shows: Cart total $45 + $5 shipping = $50
+```
+
+**ApprovalGate B**:
+- Requires approval before adding to cart
+- Issues new token with `gate_id: "gate-B"`
+
+**Step 3: Gate C (Purchase)**
+```
+Plan step 4 (Booker): Complete purchase  [gate_id: "gate-C"]
+  → Preview shows: Charge $50 to card ending in 1234
+```
+
+**ApprovalGate C**:
+- Final confirmation before payment
+- Issues token with `gate_id: "gate-C"`
+
+### Enforcement
+```python
+# ExecuteOrchestrator checks gate tokens
+if step.gate_id:
+    token = get_approval_token(step.gate_id)
+    if not token or token.plan_hash != plan_hash:
+        raise Unauthorized("Missing approval for gate")
+```
+
+**Result**: User approves at 3 checkpoints, safe multi-step purchase
+
+---
+
+## 7) Tech Stack
+
+See [README.md Tech Stack section](../../README.md#tech-stack) for the complete tech stack with rationale.
+
+**Summary**:
+- **Backend**: Python 3.11+ (FastAPI, Pydantic, SQLAlchemy async)
+- **Orchestration**: n8n (short jobs) + Temporal (long jobs)
+- **Data**: PostgreSQL 16 + pgvector, Redis 7
+- **AI**: Anthropic Claude (planning), OpenAI (embeddings only)
+- **Testing**: pytest, ruff, mypy
+- **Infra**: Docker, GitHub Actions
+
+**Key architectural decisions**:
+- **No LangChain**: Direct API calls for one-shot planning (not iterative agents)
+- **Dual runtime**: n8n for interactive (< 15min), Temporal for durable (hours/days)
+- **pgvector**: Single database for relational + vector (upgrade to dedicated vector DB if needed)
+
+---
+
+## 8) Long-Running Tasks (Visa Watcher Example)
+
+**Scenario**: "Monitor German visa appointment slots for the next 2 weeks"
+
+### Why Temporal?
+- Runs for days/weeks (not suitable for n8n)
+- Survives server restarts
+- Needs retries and backoff
+- Requires state management
+
+### How It Works
+
+**Plan**:
+```json
+{
   "graph": [
     {
       "step": 1,
-      "mode": "interactive|durable",
-      "role": "Fetcher|Analyzer|Watcher|Resolver|Booker|Notifier",
-      "uses": "<tool_id>",
-      "call": "<operation>",
-      "args": {},
-      "after": [/* deps, optional */],
-      "gate_id": "gate-A",
-      "dry_run": true
+      "mode": "durable",
+      "role": "Watcher",
+      "uses": "germany.visa",
+      "call": "monitor_slots",
+      "args": {"location": "Berlin", "duration_days": 14}
     }
-  ],
-  "constraints": { "scopes": ["calendar.write"], "ttl_s": 900 },
-  "plugins": ["<plugin_id>"],
-  "meta": { "created_at": "<iso>", "author": "planner" }
-}
-~~~
-
-### 2.4 Plan Signature (Ed25519 over canonicalized plan)
-~~~json
-{
-  "algo": "Ed25519",
-  "signer": "planner@system",
-  "ts": "<iso>",
-  "nonce": "<ulid>",
-  "signature": "<base64>",
-  "pubkey_id": "k1"
-}
-~~~
-
-### 2.5 Preview Wrapper (read-only)
-~~~json
-{
-  "normalized": {},
-  "source": "preview",
-  "can_execute": true,
-  "evidence": []
-}
-~~~
-
-### 2.6 Execute Wrapper (connector result)
-~~~json
-{
-  "provider": "<connector_id>",
-  "result": { "id": "<external_id>", "link": "<optional>" },
-  "status": "created|updated|skipped|error"
-}
-~~~
-
-### 2.7 Approval Token (binds user + plan hash; supports multi-gate)
-~~~json
-{
-  "token": "<jwt|ulid>",
-  "plan_hash": "<sha256>",
-  "user_id": "<uuid>",
-  "exp": "<iso>",
-  "scopes": ["shopping.write"]
-}
-~~~
-
----
-
-## 3) Context Tiers (Policy, not Model Feature)
-
-- **Tier 1** — Session only (utterance, parsed Intent).  
-- **Tier 2** — Stable preferences (work hours, duration, VC/location).  
-- **Tier 3** — Recent history/patterns (e.g., “Tue 10–12 works with X”).  
-- **Tier 4** — Live signals/cross-app (free/busy, People API).  
-- **Tier 5** — Private content (derived facts only; explicit consent).
-
-**ContextRAG** enforces the tier budget and emits ≤ ~2 KB of **`evidence[]`**; the Planner never pulls raw memory.
-
----
-
-## 4) Components (What Each Does)
-
-### 4.1 Intake & Reason (`components/Intake/`)
-High-level goal shaping across turns; maintains a minimal Session/Goal summary and a Readiness Gate (when to plan). Emits Intent.
-
-### 4.2 ContextRAG (`components/ContextRAG/`)
-Curates just-enough context from Profile, History, Plan Library, Vector Index, Contacts; re-ranks and emits typed evidence[].
-
-### 4.3 Profile Store / History / Vector Index
-- **Profile:** durable prefs & consent flags (forget/export).  
-- **History:** normalized outcomes (PII-light) — “what actually happened.”  
-- **Vector Index:** semantic recall of exemplars/plans/facts (per-user namespaces).
-
-### 4.4 Plan Library • Plan Retrieval
-- **Plan Library:** canonical plans, signatures, outcomes; similarity search.  
-- **Plan Retrieval:** propose successful prior plans with scores (hybrid retrieval).
-- Ranks candidates via hybrid score (BM25 + vector + success + recency). Returns a short “why” rationale and suggested seeds.
-
-
-### 4.5 Plugin Registry (n8n-aware) • Tool Selector
-- **Registry:** Source of truth for logical tools → n8n connector bindings (node name/op, param maps, previewability, safety class, scopes, idempotency hints).
-- **Selector:** choose minimal set of tools/ops per Intent (scope minimization, latency/cost/health).
-
-### 4.6 Planner (Stateless) (`components/Planner/`)
-- Deterministically emits the plan graph, labeling steps with {mode, role} and inserting HITL approval steps (with gate_id) where needed.
-
-### 4.7 Signer (`components/Signer/`)
-- Ed25519 sign/verify over the canonical plan; key rotation & audit; verification happens at Preview/Execute entry.
-
-### 4.8 Preview Orchestrator (n8n) (`components/PreviewOrchestrator/`)
-- Verifies signature
-- **Uses WorkflowBuilder** with `mode="preview"` to convert plan → read-only n8n workflow
-- Executes n8n workflow (parallel branches for independent read steps)
-- Only runs `dry_run=true` steps with previewable operations (from Registry)
-- Returns a Preview wrapper with normalized data
-
-### 4.9 Approval Gate (`components/Approvals/`)
-- Presents Preview/choices; on Approve, issues an approval token bound to {plan_hash, gate_id, user_id} with short TTL and single-use semantics.
-
-### 4.10 Execute Orchestrator (n8n, short jobs) (`components/ExecuteOrchestrator/`)
-- Verifies signature and the gate's approval token
-- **Uses WorkflowBuilder** to convert plan → n8n workflow with parallel structure
-- Executes n8n workflow (handles parallel branches internally based on `after` dependencies)
-- For each step:
-  - mode:"interactive" → already in workflow, executes via n8n parallel branches
-  - mode:"durable" → hand off to Temporal (start workflow), await signal
-- Enforces idempotency (Data Store: plan_id:step:arg_hash)
-- Collects Execute wrappers, notifies user, and calls PlanWriter
-
-### 4.11 Binding Resolver (components/BindingResolver/)
-- Small mapping layer (can live inside n8n or as a helper service):
-    {uses, call, args} + Registry vR → {node, operation, params} for the n8n node. Keeps flows generic; adding capabilities means editing the Registry, not flows.
-
-### 4.12 WorkflowBuilder (`components/WorkflowBuilder/`)
-
-**Purpose:** Convert plan dependency graph → n8n workflow JSON with parallel execution structure for both preview and execute modes.
-
-**Responsibilities:**
-- Parse plan `graph[]` and analyze `after` dependencies
-- Identify parallel-executable steps (no dependencies or shared dependencies)
-- Generate n8n workflow with Split/Merge nodes for parallel branches
-- Convert steps to n8n nodes (via Binding Resolver)
-- Handle approval gates as n8n Wait nodes
-- **Mode-specific filtering:**
-  - `preview` mode: only `dry_run=true` steps + previewable operations (read-only)
-  - `execute` mode: all steps with idempotency enforcement and compensation
-
-**API:**
-~~~python
-build_workflow(
-    plan: Plan,
-    registry: Registry,
-    mode: Literal["preview", "execute"]
-) -> N8nWorkflow
-~~~
-
-**Input:** Signed plan + Registry snapshot + mode
-**Output:** n8n workflow JSON ready for execution
-
-**Integration:**
-- Preview Orchestrator uses `mode="preview"` for read-only workflows
-- Execute Orchestrator uses `mode="execute"` for full execution workflows
-
-**Details:** See `components/WorkflowBuilder/LLD.md` (created during implementation phase)
-
-### 4.13 Durable Orchestrator (Temporal, long jobs) (`components/DurableOrchestrator/`)
-- Durable workflows for watchers/bookers/notifiers over days/weeks: deterministic core, Activities for I/O, retries/backoff, signals (approve/cancel/reconfigure), queries (status), ContinueAsNew, search attributes (user_id, plan_id, intent).
-
-### 4.14 PlanWriter (`components/PlanWriter/`)
-- **Purpose:** Persist outcomes back to **Plan Library** & **History**; trigger vector re-index.
-- **Responsibilities:** map Execute wrappers → normalized facts; **idempotent** writes.
-
-### 4.15 Audit & Observability (`components/Audit/`)
-- **Purpose:** Structured logs, metrics, traces; user/system dashboards.
-- **Responsibilities:** correlate by `plan_id`; SLOs (preview p95, execute p95), retries, error classes; summaries.
-
-### 4.16 (Optional) MemoryHub Façade (`components/MemoryHub/`)
-- **Purpose:** One door for memory ops (useful for n8n/tests).  
-- **Endpoints (conceptual):** `GET evidence`, `GET/PUT prefs`, `POST fact`, `forget/export`.  
-- **Note:** delegates to ContextRAG/Profile/History/Plan Library.
-
----
-
-## 5) Runtime Agent Roles & Asynchronous Orchestration
-
-### 5.1 Runtime Agent Model
-
-**Runtime agents** are asynchronous execution instances that execute plan steps. Not just semantic labels—actual workers (n8n sub-workflows or Temporal activities) that:
-- Execute independently and asynchronously
-- Report completion to orchestrator
-- Can run multiple instances concurrently
-- Are classified by role for responsibility isolation
-
-**Agent lifecycle:** spawn (per step) → execute → report → terminate
-
-### 5.2 Six Agent Roles (Responsibility Classification)
-
-- **Fetcher** — One-time read operations
-  - Examples: Preview fetches, API calls, calendar slots, contact lookup
-  - Implementation: n8n HTTP/connector nodes (interactive), Temporal activities (durable)
-
-- **Analyzer** — Data processing, comparison, research
-  - Examples: Compare flight options, rank restaurants, analyze expenses, find overlaps
-  - Implementation: n8n Function/Code nodes, Temporal activities with compute logic
-
-- **Watcher** — Long-running monitoring
-  - Examples: Poll visa slots for days, monitor price drops, watch for emails
-  - Implementation: Temporal workflows with ContinueAsNew, poll activities
-
-- **Resolver** — Disambiguation, user interaction
-  - Examples: "Which John?", choose from options, clarify preferences
-  - Implementation: n8n Wait nodes with webhooks, interactive approval flows
-
-- **Booker** — Writes with idempotency
-  - Examples: Create calendar events, send emails, make purchases, book appointments
-  - Implementation: n8n connector nodes (GCal, Gmail), Temporal activities with idempotency keys
-
-- **Notifier** — Updates and alerts
-  - Examples: Confirm booking, send summaries, progress updates, error notifications
-  - Implementation: n8n Slack/email nodes, Temporal notification activities
-
-### 5.3 Asynchronous Execution Model
-
-**Plan-level concurrency:**
-- Multiple plans execute simultaneously (different `plan_id` values)
-- User A books meeting while User B monitors visa slots
-- No blocking between independent plans
-
-**Step-level concurrency (within a plan):**
-- Steps with `after: []` execute immediately in parallel
-- Steps with `after: [1, 2]` wait for both dependencies, then execute
-- Dependency graph enables DAG-based parallel execution
-
-**Example parallel execution:**
-~~~json
-{
-  "graph": [
-    {"step": 1, "role": "Fetcher", "call": "get_alice_calendar", "after": []},
-    {"step": 2, "role": "Fetcher", "call": "get_bob_calendar", "after": []},
-    {"step": 3, "role": "Analyzer", "call": "find_overlap", "after": [1, 2]},
-    {"step": 4, "role": "Booker", "call": "create_event", "after": [3]}
   ]
 }
-~~~
-Steps 1 and 2 execute in parallel; step 3 waits for both; step 4 runs after step 3.
+```
 
-### 5.4 Orchestration Mechanisms
+**Temporal Workflow**:
+```python
+async def visa_watcher_workflow(plan_id: str, params: dict):
+    """Durable workflow for visa slot monitoring"""
 
-**n8n (interactive mode):**
-- WorkflowBuilder converts plan → n8n workflow JSON
-- Parallel branches for steps with no dependencies
-- Merge nodes wait for all branches to complete
-- Split/Merge pattern enables concurrent execution
+    start_time = datetime.now()
+    max_duration = timedelta(days=params["duration_days"])
 
-**Temporal (durable mode):**
-- Child workflows spawned per step
-- Fan-out pattern for parallel execution
-- Signals for coordination and approval
-- Activities for actual I/O operations
+    while datetime.now() - start_time < max_duration:
+        # Activity: Poll external API
+        result = await check_slots_activity(params["location"])
 
-### 5.5 Coordination Rules
+        if result.has_slots:
+            # Found slots! Send signal to approval gate
+            await send_notification_activity(
+                user_id=params["user_id"],
+                message=f"Visa slot found: {result.slot_date}"
+            )
 
-- Planner tags each step with `{mode, role}` for classification
-- Orchestrators spawn agent instances per step (n8n sub-workflows or Temporal activities)
-- Dependency graph (`after` field) determines execution order
-- **Resource locks** prevent conflicting writes:
-  - Fine-grained: `calendar.alice.write`, `calendar.bob.write` (can run parallel)
-  - Read operations: no locks (parallel reads allowed)
-  - Coarse locks only for rate-limited resources (e.g., `email.send`)
-- **Saga pattern** for compensation on failure
-- **Idempotency** enforced via `plan_id:step:arg_hash` keys
-- Confidence below threshold → emit `needs[]` → n8n asks user or escalates Context tier → re-plan/resume
+            # Wait for user approval (with 24h timeout)
+            approval = await workflow.wait_for_signal(
+                signal_name="user_approval",
+                timeout=timedelta(hours=24)
+            )
+
+            if approval:
+                # Book the slot
+                await book_slot_activity(result.slot_id)
+                await send_notification_activity(
+                    user_id=params["user_id"],
+                    message="✓ Visa appointment booked!"
+                )
+                break
+            else:
+                # User didn't approve in time, continue watching
+                continue
+
+        # Sleep for 6 hours before next check
+        await asyncio.sleep(6 * 3600)
+
+        # Prevent workflow history bloat: reset every 24 hours
+        if datetime.now() - start_time > timedelta(hours=24):
+            workflow.continue_as_new(plan_id, params)
+
+    # Duration expired, notify user
+    await send_notification_activity(
+        user_id=params["user_id"],
+        message="Visa slot monitoring ended (14 days elapsed)"
+    )
+```
+
+**Key Patterns**:
+1. **Deterministic core**: All business logic in workflow
+2. **Activities for I/O**: External API calls, database writes
+3. **Signals**: User approval/cancellation
+4. **ContinueAsNew**: Reset workflow every 24h to prevent history bloat
+5. **Retries**: Automatic retry on transient failures
+
+**Result**: Monitors visa slots 24/7 for 2 weeks, survives restarts, handles approval flow
 
 ---
 
-## 6) Human-in-the-Loop (HITL) Pattern (Multi-Gate)
+## 9) Data Schemas (Canonical Contracts)
 
-Insert explicit approval steps with unique gate_id (“gate-A”, “gate-B”…).
-Each gate issues a token bound to {plan_hash, gate_id, user_id}.
-Subsequent write steps must present the matching gate token or they won’t run.
-Typical shopping flow: shortlist → Gate A (choose) → add to cart → Gate B (final review) → purchase.
+All components use these schemas. Full definitions in [GLOBAL_SPEC.md](GLOBAL_SPEC.md).
 
-## 7) Dynamic Mapping to n8n Connectors
-
-Registry stores connector bindings for each logical uses/call: node name, operation, arg/param maps, previewability, scopes, idempotency hints.
-Binding Resolver turns plan steps into ready-to-run n8n node parameters.
-n8n flows remain generic (Preview/Execute only); adding capabilities is a Registry edit, not a flow change.
-
-## 8) Safety, Reliability, Governance
-
-Signature verified at Preview/Execute; approval tokens required for writes (and per-gate where applicable).
-Preview never mutates; only Registry-marked previewable ops run there.
-Idempotency on every write (plan_id:step:arg_hash in n8n Data Store/DB).
-Compensation when supported (cancel/delete ops declared in Registry).
-Privacy: Tier-5 gated by consent; store derived facts; TTL/forget/export supported.
-Observability: per-step logs with plan_id, op, latency_ms, retries, status.
-
-## 9) Non-Functional Baselines
-
-Preview p95 < 800 ms; short Execute steps p95 < 2 s.
-ContextRAG p95 < 150 ms; Plan Retrieval p95 < 200 ms; Vector top-K < 100 ms.
-Durable flows survive restarts; ContinueAsNew daily or on N events.
-Availability: 99.9% (Intake/Preview), 99.5% (Execute/Durable).
-
-## 10) Complete End-to-End Flow
-
-**Example: "Book meeting with Alice next week"**
-
-### Phase 1: Intent Formation & Planning
-
-**1. User Input (FastAPI)**
-- User message received via HTTP POST `/api/intake`
-- Intake component maintains session state (Redis)
-- Triggers Readiness Gate → proceeds to planning
-
-**2. Context Gathering (ContextRAG)**
-- Generates embedding for intent (OpenAI embeddings API)
-- Vector search in pgvector for similar past plans
-- Fetches user preferences from PostgreSQL
-- Retrieves recent history
-- Produces typed Evidence[] (≤2KB)
-
-**3. Plan Generation (Planner)**
-- Calls Anthropic Claude API with:
-  - Intent JSON
-  - Evidence[] from ContextRAG
-  - Registry snapshot (available tools)
-  - GLOBAL_SPEC policy version
-- LLM generates deterministic Plan with:
-  - Steps with {mode, role, uses, call, args, after}
-  - Dependency graph (parallel Fetcher steps)
-  - Approval gates (gate-A for slot selection)
-- Returns canonical Plan JSON
-
-**4. Plan Signing (Signer)**
-- Canonicalizes Plan JSON (deterministic serialization)
-- Signs with Ed25519 private key
-- Attaches signature + nonce + timestamp
-
-### Phase 2: Preview Generation
-
-**5. Preview Workflow (n8n)**
-- Preview Orchestrator receives signed plan
-- Verifies Ed25519 signature
-- Calls **WorkflowBuilder** with `mode="preview"`
-- WorkflowBuilder:
-  - Filters to `dry_run=true` steps only
-  - Checks Registry for previewable operations
-  - Generates n8n workflow JSON with parallel branches
-  - Example: Fetch Alice's calendar + Fetch user's calendar in parallel
-- n8n executes workflow:
-  - Spawns parallel branches (Split node)
-  - Calls Google Calendar API (read-only)
-  - Merges results (Merge node)
-  - Analyzer step finds overlapping slots
-- Returns Preview wrapper with normalized time slots
-
-**6. User Review (Frontend)**
-- Preview displayed to user in UI (React/Next.js)
-- Shows available time slots
-- User selects preferred slot
-- Clicks "Approve"
-
-### Phase 3: Approval & Execution
-
-**7. Approval Gate**
-- Frontend sends approval to `/api/approvals/gate-A`
-- Approval Gate component:
-  - Validates plan_hash matches
-  - Generates JWT approval token
-  - Binds: {plan_hash, gate_id: "gate-A", user_id, scopes, exp}
-- Returns token to frontend
-
-**8. Execute Workflow (n8n)**
-- Execute Orchestrator receives plan + approval token
-- Verifies signature + approval token
-- Calls **WorkflowBuilder** with `mode="execute"`
-- WorkflowBuilder:
-  - Includes all steps (not just dry_run)
-  - Generates n8n workflow with:
-    - Parallel Fetcher steps (if any dependencies needed)
-    - Analyzer step (post-merge)
-    - Booker step (create calendar event)
-    - Notifier step (send confirmation)
-- n8n executes workflow:
-  - Checks idempotency (Redis: `plan_id:step:arg_hash`)
-  - If not exists:
-    - Calls Google Calendar API (create event)
-    - Stores result in Redis (TTL: 1 hour)
-    - Sends notification via Slack/email
-  - If exists: returns cached result
-- Returns Execute wrapper with event ID
-
-**9. Persist Outcomes (PlanWriter)**
-- Receives Execute wrappers
-- Writes to Plan Library (PostgreSQL):
-  - Plan + signature + outcome
-  - Success/failure status
-- Writes to History (PostgreSQL):
-  - Normalized facts (PII-light)
-  - "Meeting booked with Alice at 2pm Tuesday"
-- Triggers vector re-indexing:
-  - Generates embedding for completed plan
-  - Stores in pgvector for future retrieval
-
-**10. Audit & Observability**
-- Logs correlated by `plan_id`:
-  - Each component logs: step, role, operation, latency_ms, status
-  - No secrets/PII in logs
-- Metrics emitted:
-  - Preview latency: 650ms (✓ under 800ms p95)
-  - Execute latency: 1.2s (✓ under 2s p95)
-  - ContextRAG latency: 120ms (✓ under 150ms p95)
-
-### Alternative Flow: Long-Running Watcher
-
-**Durable Execution (Temporal)**
-
-For long-running tasks (e.g., "Monitor visa slots for next 2 weeks"):
-
-1. Plan includes step with `mode: "durable"`, `role: "Watcher"`
-2. Execute Orchestrator hands off to Temporal:
-   - Starts Temporal workflow: `WatcherWorkflow.run(plan_id, task_params)`
-   - Workflow runs for days/weeks
-   - Polls external API every 6 hours (Temporal Activity)
-   - Uses ContinueAsNew pattern after 24 hours
-3. When slot detected:
-   - Workflow sends Signal to Approval Gate
-   - User receives notification
-   - User approves → workflow continues
-   - Booker activity books the slot
-   - Notifier activity confirms
-4. PlanWriter persists outcome
-
-### Technology Flow Summary
-
-```
-User → FastAPI → PostgreSQL (session)
-     ↓
-FastAPI → OpenAI (embeddings) → pgvector (similarity search)
-     ↓
-FastAPI → Anthropic Claude (planning) → Plan JSON
-     ↓
-FastAPI → cryptography (Ed25519 sign)
-     ↓
-FastAPI → WorkflowBuilder (Python) → n8n workflow JSON
-     ↓
-n8n → Google Calendar API / Slack API / etc.
-     ↓
-n8n → Redis (idempotency check)
-     ↓
-n8n → PostgreSQL (Plan Library, History)
-     ↓
-PostgreSQL → pgvector (re-index)
-
-Alternative (Durable):
-FastAPI → Temporal (start workflow)
-     ↓
-Temporal → Activities (poll external APIs)
-     ↓
-Temporal → Signal → FastAPI (approval needed)
-     ↓
-Temporal → Activities (execute booking)
+### Intent
+```json
+{
+  "intent": "schedule_meeting",
+  "entities": {
+    "attendee": "Alice",
+    "timeframe": "next week"
+  },
+  "constraints": {
+    "duration_min": 30
+  },
+  "tz": "America/Chicago",
+  "user_id": "user-123"
+}
 ```
 
-## 11) Tech Stack
+### Evidence Item
+```json
+{
+  "type": "preference",
+  "key": "meeting_duration_min",
+  "value": 30,
+  "confidence": 0.95,
+  "source_ref": "kv:prefs/duration"
+}
+```
 
-### Core Backend
-- **Python 3.11+** — Primary language for all components
-  - FastAPI — API framework (async/await)
-  - Pydantic v2 — Data validation and serialization
-  - SQLAlchemy — Database ORM (async)
-  - asyncpg — PostgreSQL async driver
-  - aioredis — Redis async client
-  - cryptography — Ed25519 signing
-  - UV — Package manager
-
-### Orchestration & Workflows
-- **n8n (self-hosted)** — Interactive workflow orchestration
-  - Node.js runtime
-  - Docker deployment
-  - Webhook triggers
-  - Connector nodes (Google, Slack, HTTP, etc.)
-- **Temporal (Temporal Cloud or self-hosted)** — Durable workflow engine
-  - temporal-python-sdk
-  - Go runtime (Temporal server)
-  - PostgreSQL backend (for Temporal state)
-
-### Data Storage
-- **PostgreSQL 16** — Primary database
-  - pgvector extension — Vector similarity search
-  - User profiles, preferences, consents
-  - Plan Library (plans + signatures + outcomes)
-  - History (normalized facts, PII-light)
-  - Vector embeddings storage
-- **Redis 7** — Cache and idempotency
-  - Idempotency keys (`plan_id:step:arg_hash`)
-  - Session state
-  - Rate limiting
-  - TTL-based caching
-
-### AI/LLM
-- **Anthropic Claude API** — Planning (deterministic, temperature=0)
-  - Model: claude-3-5-sonnet-20241022
-  - Direct SDK (no LangChain framework)
-  - Structured outputs (JSON mode or tool use)
-- **OpenAI API** — Embeddings only
-  - Model: text-embedding-3-small
-  - Vector generation for semantic search
-- **No LangChain** — Direct API calls for simplicity and control
-
-### Frontend (Optional)
-- **React / Next.js** — Approval UI, preview display
-  - TypeScript
-  - Tailwind CSS
-  - API integration via fetch/axios
-
-### Infrastructure & Deployment
-- **Docker** — Containerization
-  - Dockerfile for each component
-  - Docker Compose for local development
-  - Multi-stage builds for production
-- **GitHub Actions** — CI/CD
-  - Automated testing (pytest)
-  - Schema validation
-  - Docker image builds
-  - Deployment automation
-- **Cloud Provider** — (AWS/GCP/Azure)
-  - Managed PostgreSQL (RDS/Cloud SQL)
-  - Managed Redis (ElastiCache/Memorystore)
-  - Container orchestration (ECS/Cloud Run/AKS)
-  - Object storage (S3/GCS/Blob Storage) for artifacts
-
-### Testing & Quality
-- **pytest** — Testing framework
-  - Unit tests
-  - Integration tests
-  - Async test support (pytest-asyncio)
-  - Fixtures and mocking
-- **ruff** — Linter and formatter
-- **mypy** — Static type checking
-- **Coverage.py** — Code coverage reporting
-
-### Observability
-- **Structured Logging** — JSON logs
-  - Python logging module
-  - Correlation via plan_id
-  - No PII in logs
-- **Metrics** — (Prometheus/Grafana or cloud-native)
-  - Latency (p95, p99)
-  - Error rates
-  - Step execution times
-  - Token usage (LLM costs)
-- **Tracing** — (Optional: LangSmith or OpenTelemetry)
-  - LLM call tracing
-  - Distributed tracing across components
-
-### Security & Cryptography
-- **Ed25519** — Plan signing/verification
-  - cryptography library (Python)
-  - Key rotation support
-- **JWT** — Approval tokens
-  - PyJWT library
-  - Short TTL (15 minutes)
-  - Single-use semantics
-- **OAuth2/OpenID Connect** — User authentication (future)
-
-### Utilities
-- **NetworkX** — Graph algorithms (WorkflowBuilder dependency analysis)
-- **httpx** — HTTP client (async)
-- **ulid-py** — ULID generation (plan_id, user_id)
-- **python-json-logger** — Structured logging
-
-### Development Tools
-- **VS Code** — IDE (with Python, Docker extensions)
-- **Postman/Thunder Client** — API testing
-- **pgAdmin** — PostgreSQL GUI
-- **Redis Insight** — Redis GUI
-- **n8n UI** — Workflow visualization
-
-### Architecture Decision Rationale
-
-**Why no LangChain?**
-- Your architecture uses **one-shot planning** (single LLM call), not iterative agent loops
-- Runtime agents are **deterministic executors**, not LLM-powered decision makers
-- Direct API calls provide better control, simplicity, and debuggability
-- Custom ContextRAG implementation needed for tier-based budgeting and privacy
-
-**Why n8n + Temporal dual runtime?**
-- **n8n**: Best for short, synchronous, connector-based workflows (< 15 min)
-- **Temporal**: Best for long-running, stateful, resumable workflows (hours/days/weeks)
-- Separation of concerns: interactive vs durable execution
-
-**Why pgvector over dedicated vector DB?**
-- Single database (PostgreSQL) for relational + vector data
-- Simpler operations (no separate vector DB to manage)
-- Good enough for <1M vectors
-- Upgrade path to Pinecone/Qdrant if needed later
-
-**Why FastAPI over Django?**
-- Async/await native support
-- Lightweight and modern
-- Better performance for I/O-bound operations
-- Excellent Pydantic integration
-- Simpler for API-focused architecture
-
-## 12) Repository Mapping (Per Component Packet)
-
-Each components/<Name>/ includes: SPEC.md, LLD.md, schemas/, tests/, code.
-Additionally, usecases/<UseCase>/ includes: SPEC.md, LLD.md, plans/, tests/, fixtures/.
-Intake, ContextRAG, Planner, Signer, PreviewOrchestrator, ExecuteOrchestrator, DurableOrchestrator, PluginRegistry, BindingResolver, PlanLibrary, PlanRetrieval, PlanWriter, Audit.
-GLOBAL_SPEC.md: Intent, Evidence, Preview/Execute wrappers, plan step schema with {mode, role, after, gate_id}.
-
-## 13) End-to-End Examples (Conceptual)
-- 13.1 Meeting (interactive)
-
-Intent → ContextRAG → Plan (list_free_busy → Gate A approve slot → create_event) → Preview (read) → Gate A token → Execute (write) → PlanWriter/Audit.
-
-- 13.2 Shopping (HITL multi-gate)
-
-Search/rank → Gate A (choose shortlist) → add_to_cart → Gate B (cart review) → purchase.
-Each write phase requires the matching gate token; idempotency avoids duplicates.
-
-- 13.3 Visa watcher (durable)
-
-Watchers in Temporal; on slot hold → signal Gate for approval; on approve, book; notify; write-back.
-
-- 13.4 Parallel execution (interactive with dependencies)
-
-**Intent:** "Find meeting time with Alice and Bob"
-
-**Plan:**
-~~~json
+### Plan (with execute_mode for preview caching)
+```json
 {
   "plan_id": "01HX...",
   "graph": [
-    {"step": 1, "mode": "interactive", "role": "Fetcher",
-     "uses": "google.calendar", "call": "list_free_busy",
-     "args": {"user": "alice@example.com"}, "after": []},
-    {"step": 2, "mode": "interactive", "role": "Fetcher",
-     "uses": "google.calendar", "call": "list_free_busy",
-     "args": {"user": "bob@example.com"}, "after": []},
-    {"step": 3, "mode": "interactive", "role": "Analyzer",
-     "uses": "system.analyze", "call": "find_overlap",
-     "args": {}, "after": [1, 2]},
-    {"step": 4, "mode": "interactive", "role": "Resolver",
-     "uses": "system.approval", "call": "confirm_slot",
-     "gate_id": "gate-A", "after": [3]},
-    {"step": 5, "mode": "interactive", "role": "Booker",
-     "uses": "google.calendar", "call": "create_event",
-     "args": {}, "after": [4]}
+    {
+      "step": 1,
+      "mode": "interactive",
+      "role": "Fetcher",
+      "uses": "google.calendar",
+      "call": "list_free_busy",
+      "args": {"user": "alice@example.com"},
+      "after": [],
+      "execute_mode": "preview_only",
+      "dry_run": true
+    },
+    {
+      "step": 2,
+      "mode": "interactive",
+      "role": "Booker",
+      "uses": "google.calendar",
+      "call": "create_event",
+      "args": {
+        "slot": "{{preview.cached_state.selected_slot}}"
+      },
+      "after": [1],
+      "gate_id": "gate-A",
+      "execute_mode": "execute_only"
+    }
   ]
 }
-~~~
+```
 
-**Execution flow:**
-1. WorkflowBuilder converts plan → n8n workflow
-2. Steps 1 and 2 execute in parallel (n8n Split → [Fetch Alice || Fetch Bob] → Merge)
-3. Step 3 executes after merge (Analyzer finds overlapping slots)
-4. Step 4 presents options to user (Wait node for Gate A approval)
-5. Step 5 creates event after approval (Booker with idempotency)
-
-**Timeline:**
-- t=0ms: Steps 1 & 2 start simultaneously
-- t=200ms: Both complete, step 3 starts
-- t=350ms: Step 3 completes, step 4 shows preview to user
-- t=user: User approves (Gate A token issued)
-- t=user+50ms: Step 5 creates event
+**execute_mode values**:
+- `both` (default): Run in preview AND execute
+- `preview_only`: Skip during execute (cached in preview state)
+- `execute_only`: Skip during preview (use cached args)
 
 ---
+
+## 10) Repository Structure
+
+Each component follows the same structure for consistency:
+
+```
+components/<ComponentName>/
+├── SPEC.md           # Declares conformance to GLOBAL_SPEC
+├── LLD.md            # Low-level design details
+├── schemas/          # Pydantic models
+│   ├── input.py
+│   ├── output.py
+│   └── internal.py
+├── tests/            # Unit and integration tests
+│   ├── test_unit.py
+│   └── test_integration.py
+└── <code files>      # Implementation
+
+usecases/<UseCase>/
+├── SPEC.md           # Use case specification
+├── LLD.md            # Implementation design
+├── plans/            # Example plans
+│   ├── drafts/       # Work-in-progress plans
+│   └── approved/     # Validated plans
+├── tests/            # End-to-end tests
+└── fixtures/         # Test data
+```
+
+**16 Core Components**:
+1. ProfileStore, History, VectorIndex, PlanLibrary (Memory Layer)
+2. Intake, ContextRAG, Planner, Signer, PluginRegistry, PlanWriter (Domain Layer)
+3. WorkflowBuilder, PreviewOrchestrator, ApprovalGate, ExecuteOrchestrator, DurableOrchestrator (Orchestration Layer)
+4. Audit (Utilities)
+
+---
+
+## 11) Performance Targets
+
+### Latency (p95)
+- **Preview**: < 800ms (target: 650ms)
+- **Execute (short)**: < 2s (target: 1.2s)
+- **ContextRAG**: < 150ms (target: 120ms)
+- **Plan Retrieval**: < 200ms
+- **Vector search**: < 100ms
+
+### Availability
+- **Intake/Preview**: 99.9% (< 43min downtime/month)
+- **Execute/Durable**: 99.5% (< 3.6hr downtime/month)
+
+### Scalability
+- **Concurrent plans**: 100+ simultaneous executions
+- **Vector index**: < 1M embeddings (upgrade to dedicated DB if exceeded)
+- **Plan library**: Unlimited (PostgreSQL partitioned by month)
+
+---
+
+## 12) What's Next?
+
+After reading this HLD, you should:
+
+1. **Understand the architecture**: Preview-first, deterministic planning, dual runtime
+2. **Know the 16 components**: Memory, Domain, Orchestration, Utilities layers
+3. **See the flow**: Intent → Plan → Preview → Approve → Execute → Learn
+4. **Understand safety**: Idempotency, compensation, resource locking, privacy tiers
+
+### For Developers:
+1. Read [GLOBAL_SPEC.md](GLOBAL_SPEC.md) for universal contracts
+2. Read [MODULAR_ARCHITECTURE.md](MODULAR_ARCHITECTURE.md) for layer details
+3. Pick a component to implement
+4. Create `components/<Name>/SPEC.md` declaring conformance
+5. Design `components/<Name>/LLD.md` with implementation details
+6. Implement with tests until CI passes
+
+### For Product/Stakeholders:
+1. See Section 2 for complete end-to-end example
+2. See Section 6 for multi-gate approval example
+3. See Section 8 for long-running task example
+4. Trust that preview-first safety prevents unwanted actions
+
+---
+
+**Document Version**: HLD v4.0 (Simplified)
+**Last Updated**: 2025-01-08
+**Changes from v3.4**: Restructured for clarity, added real-world examples, removed redundancy, emphasized preview state caching
