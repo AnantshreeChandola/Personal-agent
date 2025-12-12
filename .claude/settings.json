@@ -41,9 +41,7 @@
 
       "WebFetch(domain:docs.anthropic.com)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:docs.github.com)",
-
-      "mcp__serena"
+      "WebFetch(domain:docs.github.com)"
     ],
     "deny": [
       "Bash(sudo:*)",

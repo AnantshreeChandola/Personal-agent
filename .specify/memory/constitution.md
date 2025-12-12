@@ -1,117 +1,50 @@
-# Project Constitution (Non-Negotiables)
+# [PROJECT_NAME] Constitution
+<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
 
-This file defines the guardrails for all contributors and agents. It is **binding**.
+## Core Principles
 
-## 1) Branches & Pull Requests
-- **Protected:** `main` — no direct pushes.
-- All changes via **PRs** from branches named:
-  - `feat/<area>-<desc>`, `feat/uc-<usecase>-<desc>`, `feat/comp-<component>-<desc>`, `fix/<area>-<desc>`, or `docs/<area>-<desc>`.
-- **Human review required** on every PR.
-- PR body must:
-  - List **use case and components touched** and link their `usecases/<UseCase>/{SPEC.md,LLD.md}` and `components/<Name>/{SPEC.md,LLD.md}`.
-  - Include the checklist in §10.
+### [PRINCIPLE_1_NAME]
+<!-- Example: I. Library-First -->
+[PRINCIPLE_1_DESCRIPTION]
+<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
 
-## 2) CI Is the Gate
-- **Green CI is required** to merge. If CI fails, keep iterating on the same branch.
-- CI must run at minimum:
-  - Component tests: `components/**/tests`
-  - Use‑case tests: `usecases/**/tests`
-  - System tests: `tests`
-  - (When present) schema validation (shared + components), plan/envelope schema checks, SAST, license checks
+### [PRINCIPLE_2_NAME]
+<!-- Example: II. CLI Interface -->
+[PRINCIPLE_2_DESCRIPTION]
+<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
 
-## 3) Safety Model — Preview vs Execute
-- **Preview** paths use **stubs/mocks only**; never call real providers or mutate external state.
-- **Execute** runs only after **explicit human approval** and **plan‑signature verification**.
-- Preview should attach/link **evidence** (artifacts/payloads/screens) in the PR.
+### [PRINCIPLE_3_NAME]
+<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
+[PRINCIPLE_3_DESCRIPTION]
+<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
 
-- Approval tokens are required for any write step; multi‑gate flows must present the matching gate’s token.
-- All writes must be **idempotent** (key: `plan_id:step:arg_hash`), with compensation when declared in the Registry.
+### [PRINCIPLE_4_NAME]
+<!-- Example: IV. Integration Testing -->
+[PRINCIPLE_4_DESCRIPTION]
+<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
 
-## 4) Secrets, Privacy, Logs
-- No secrets in code, PRs, or logs. Use environment managers (e.g., GitHub Secrets).
-- Default timezone: **America/Chicago**; avoid leaking precise geo/PII.
-- Logs must be structured, minimal, and free of PII.
+### [PRINCIPLE_5_NAME]
+<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
+[PRINCIPLE_5_DESCRIPTION]
+<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
 
-## 5) Source of Truth (Paths)
-- Structure: `docs/architecture/PROJECT_STRUCTURE.md`
-- Global HLD: `docs/architecture/Project_HLD.md`
-- ADRs: `docs/architecture/adr/NNNN-title.md`
-- **Use cases:** `usecases/<UseCase>/{SPEC.md, LLD.md, plans/, tests/, fixtures/}`
-- **Components:** `components/<Name>/{SPEC.md, LLD.md, api/, service/, domain/, adapters/, schemas/, diagrams/, tests/}`
-- **Shared contracts:** `plugins/{catalog.yaml, schemas/*}`
-- **System tests:** `tests/`
-- **CI workflows:** `.github/workflows/`
+## [SECTION_2_NAME]
+<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
 
-## 6) Component Packet Rules (must follow)
-Every new or modified component **must** conform to this structure:
-components/<Name>/
-SPEC.md # WHAT & acceptance (requirements/ACs)
-LLD.md # HOW (APIs, sequences, data models, failure modes)
-api/ # routes/controllers/handlers; thin I/O only
-service/ # component services; implements preview(), execute(); no cross‑component orchestration or connector bindings
-domain/ # pure domain models & invariants; no external deps
-adapters/ # external integrations (HTTP, DB, queues); called by service
-schemas/ # component-specific JSON Schemas
-tests/ # acceptance/contract tests for this component
-diagrams/ # mermaid/plantuml as needed
+[SECTION_2_CONTENT]
+<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
 
+## [SECTION_3_NAME]
+<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
 
-**Layering rules**
-- `api/handlers` **must not** contain business logic; call `service/*` only.
-- `service/` implements **`preview(input, tz)`** and **`execute(approved_preview, creds)`**.
-  - `preview()` **must not** call mutating adapters.
-  - `execute()` may call adapters, subject to approvals in §3; enforce idempotency keys and support compensation when declared.
-- `domain/` is framework- and provider-agnostic (pure types/validation).
-- `adapters/` is the only place that touches external systems.
-- Component-specific schemas live in `components/<Name>/schemas/`; **shared** schemas live in `plugins/schemas/`.
- - Emit audit fields (no PII): `plan_id, step, role, op, latency_ms, status`.
+[SECTION_3_CONTENT]
+<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
 
-**Test rules**
-- Each component must include at least **one contract/acceptance test** under `components/<Name>/tests/`.
-- Each use case must include scenario/e2e tests under `usecases/<UseCase>/tests/`.
-- Contract tests should validate payloads against the declared JSON Schemas.
+## Governance
+<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-## 7) Contracts & Verification
-- Public payloads must be defined by **JSON Schemas** (component local or shared).
- - Tests must enforce **acceptance criteria** from the component’s or use case’s `SPEC.md`.
-- **Definition of Done**:
-  - Relevant SPEC/LLD linked in the PR (use case and components touched)
-  - Tests passing (use‑case + component + system)
-  - Schemas updated/validated if payloads changed
-  - Preview evidence (if applicable) attached
-  - Human review approved
- - Backward compatibility required for components; breaking changes demand an ADR + version bump.
+[GOVERNANCE_RULES]
+<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
 
-## 8) Decision Records (ADRs)
-- Record significant decisions under `docs/architecture/adr/NNNN-title.md`.
-- Do not rewrite old ADRs; supersede with a new one if the decision changes.
-
-## 9) Plans & Provenance (Optional but encouraged)
-- When using plan signing or execution records:
-  - Drafts: `plans/drafts/`
-  - Signed: `plans/signed/`
-  - Run records/evidence: `plans/records/`
-
-## 10) PR Checklist (include in every PR body)
-- [ ] Use case and components touched listed; **SPEC/LLD links included** (required)
-- [ ] (Optional) Planning notes attached or “N/A”
-- [ ] Tests added/updated and **green** (use‑case + component + system)
-- [ ] Schemas updated and validated (if payloads changed)
-- [ ] Plan has {mode, role, after, gate_id}; signature verified at Preview/Execute
-- [ ] Approval tokens enforced for writes; idempotency keys present; compensation paths (if declared)
-- [ ] Backward compatibility maintained OR ADR link + version bump noted
-- [ ] Preview uses stubs/mocks; **no secrets** committed
-- [ ] Evidence/artifacts linked (if applicable)
-- [ ] Reviewer(s) assigned
-
-## 11) Tooling & Agents
-- Agents may use: git (clone/checkout/commit/open PR), shell to run tests/linters, editors.
-- Agents **must not** alter branch protections, CI settings, or repository secrets.
-- Multi-agent flows (planner/implementer/verifier/pr-manager) must satisfy §10 before requesting merge; a critic role confirms the checklist and CI status.
-
-## 12) Violations
-- PRs that bypass these rules will be closed or reverted.
-- Repeated violations may lead to branch restrictions.
-
----
-_Amend this constitution only via PR that updates this file and adds an ADR explaining why._
+**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
+<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
